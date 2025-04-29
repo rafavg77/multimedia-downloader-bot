@@ -1,6 +1,6 @@
 services:
   mediabot:
-    build: .
+    image: rafavg77/multimedia-downloader-bot:latest
     container_name: mediabot
     environment:
       - BOT_TOKEN=${BOT_TOKEN}
