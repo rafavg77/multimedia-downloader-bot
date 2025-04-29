@@ -1,12 +1,19 @@
 import os
 import logging
 import asyncio
-import subprocess
+import signal
 from typing import Final
 from pathlib import Path
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, CallbackQueryHandler, filters
+
+# Import our modules
+from db_manager import (
+    init_db, is_user_authorized, is_super_admin, add_authorized_user, 
+    log_unauthorized_attempt, get_unauthorized_events
+)
+from downloader import download_video, ensure_directories
 
 # Enable logging
 logging.basicConfig(
@@ -18,16 +25,88 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 TOKEN: Final = os.getenv('BOT_TOKEN')
 
-# Create downloads directory if it doesn't exist
-DOWNLOAD_DIR = Path(__file__).parent / "downloads"
-DOWNLOAD_DIR.mkdir(exist_ok=True)
+# Define directories
+BASE_DIR = Path(__file__).parent
+DOWNLOAD_DIR = BASE_DIR / os.getenv('DOWNLOAD_DIR', 'downloads')
+SAVED_VIDEOS_DIR = BASE_DIR / os.getenv('SAVED_VIDEOS_DIR', 'saved_videos')
 
-# Create a directory for saved videos
-SAVED_VIDEOS_DIR = Path(__file__).parent / "saved_videos"
-SAVED_VIDEOS_DIR.mkdir(exist_ok=True)
+# Ensure directories exist
+ensure_directories([DOWNLOAD_DIR, SAVED_VIDEOS_DIR])
+
+async def handle_unauthorized_user(update: Update, command: str = None):
+    """Handle unauthorized access attempts."""
+    chat_id = update.effective_chat.id
+    username = update.effective_user.username if update.effective_user else None
+    
+    # Log the unauthorized attempt
+    await log_unauthorized_attempt(
+        chat_id=chat_id,
+        username=username,
+        command=command or update.message.text if update.message else "unknown"
+    )
+    
+    # Send the unauthorized message
+    await update.message.reply_text("keep trying script kiddie 😎")
+    logger.warning(f"Unauthorized access attempt from chat_id: {chat_id}")
+
+async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin command to add authorized users. Only super admins can use this."""
+    if not await is_super_admin(update.effective_chat.id):
+        await handle_unauthorized_user(update, "/admin")
+        return
+    
+    if not context.args:
+        await update.message.reply_text(
+            "Uso: /admin <chat_id> [username] [is_super_admin]\n"
+            "is_super_admin puede ser 'true' o 'false'"
+        )
+        return
+    
+    try:
+        chat_id = int(context.args[0])
+        username = context.args[1] if len(context.args) > 1 else None
+        is_super = (
+            context.args[2].lower() == 'true'
+            if len(context.args) > 2
+            else False
+        )
+        
+        await add_authorized_user(chat_id, username, is_super)
+        role = "super administrador" if is_super else "usuario autorizado"
+        await update.message.reply_text(
+            f"Usuario {chat_id} agregado exitosamente como {role}."
+        )
+    except ValueError:
+        await update.message.reply_text("Error: El chat_id debe ser un número.")
+
+async def events_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Command to view unauthorized access attempts. Only super admins can use this."""
+    if not await is_super_admin(update.effective_chat.id):
+        await handle_unauthorized_user(update, "/events")
+        return
+    
+    events = await get_unauthorized_events(10)  # Get last 10 events
+    if not events:
+        await update.message.reply_text("No hay intentos no autorizados registrados.")
+        return
+    
+    message = "Últimos intentos no autorizados:\n\n"
+    for event in events:
+        chat_id, username, command, timestamp = event
+        message += f"🚫 Chat ID: {chat_id}\n"
+        message += f"👤 Username: {username or 'N/A'}\n"
+        message += f"🔍 Comando: {command}\n"
+        message += f"⏰ Fecha: {timestamp}\n"
+        message += "------------------------\n"
+    
+    await update.message.reply_text(message)
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Send a message when the command /start is issued."""
+    if not await is_user_authorized(update.effective_chat.id):
+        await handle_unauthorized_user(update, "/start")
+        return
+
     await update.message.reply_text(
         "¡Hola! Envíame un enlace de video de Instagram, Facebook, TikTok o YouTube "
         "y te preguntaré qué quieres hacer con él. 🎥"
@@ -35,6 +114,10 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Send a message when the command /help is issued."""
+    if not await is_user_authorized(update.effective_chat.id):
+        await handle_unauthorized_user(update, "/help")
+        return
+
     await update.message.reply_text(
         "Simplemente envía un enlace de video y te daré tres opciones:\n\n"
         "1. Descargar y enviar: El video se descargará y te lo enviaré en el chat\n"
@@ -47,44 +130,12 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "- YouTube (videos)"
     )
 
-async def run_yt_dlp(url: str, output_dir: Path) -> tuple[bool, str, Path]:
-    """Run yt-dlp command directly and return the downloaded file path."""
-    try:
-        # Prepare the command
-        cmd = [
-            'yt-dlp',
-            '--no-warnings',
-            '-f', 'best',
-            '-o', str(output_dir / '%(title)s.%(ext)s'),
-            url
-        ]
-        
-        # Run the command
-        process = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
-        
-        stdout, stderr = await process.communicate()
-        
-        if process.returncode != 0:
-            return False, f"Error: {stderr.decode()}", Path()
-            
-        # Find the downloaded file
-        files = list(output_dir.glob("*"))
-        if not files:
-            return False, "No se encontró el archivo descargado", Path()
-            
-        # Get the most recently modified file
-        latest_file = max(files, key=lambda x: x.stat().st_mtime)
-        return True, "Descarga exitosa", latest_file
-        
-    except Exception as e:
-        return False, f"Error: {str(e)}", Path()
-
 async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle incoming URLs and show action options."""
+    if not await is_user_authorized(update.effective_chat.id):
+        await handle_unauthorized_user(update)
+        return
+
     url = update.message.text
     
     # Store URL in user_data for later use
@@ -109,6 +160,11 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle button callbacks."""
+    if not await is_user_authorized(update.callback_query.message.chat_id):
+        await update.callback_query.answer("No estás autorizado para usar este bot.")
+        await update.callback_query.message.delete()
+        return
+
     query = update.callback_query
     await query.answer()
     
@@ -124,7 +180,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         output_dir = SAVED_VIDEOS_DIR if query.data in ["save", "save_and_send"] else DOWNLOAD_DIR
         
         await message.edit_text("⬇️ Descargando video...")
-        success, status_msg, video_path = await run_yt_dlp(url, output_dir)
+        success, status_msg, video_path = await download_video(url, output_dir)
         
         if not success:
             raise Exception(status_msg)
@@ -166,31 +222,80 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             "Por favor, verifica que el enlace sea válido."
         )
 
-def main() -> None:
+async def shutdown(application: Application) -> None:
+    """Shutdown the bot gracefully."""
+    logger.info("Shutting down...")
+    try:
+        if application.running:
+            await application.updater.stop()
+            await application.stop()
+            await application.shutdown()
+    except Exception as e:
+        logger.error(f"Error during shutdown: {e}")
+
+async def main() -> None:
     """Start the bot."""
     if not TOKEN:
         logger.error("No bot token provided!")
         return
 
+    # Initialize the database
+    await init_db()
+        
+    # Initialize Application
     application = Application.builder().token(TOKEN).build()
 
-    # Command handlers
+    # Add handlers
+    application.add_handler(CommandHandler("admin", admin_command))
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))
-
-    # URL handler
+    application.add_handler(CommandHandler("events", events_command))
     application.add_handler(
         MessageHandler(
             filters.TEXT & ~filters.COMMAND & filters.Entity("url"),
             handle_url
         )
     )
-    
-    # Callback query handler
     application.add_handler(CallbackQueryHandler(button_callback))
 
-    # Start the bot
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    try:
+        # Start the bot
+        logger.info("Starting bot...")
+        await application.initialize()
+        await application.start()
+        
+        stop_signal = asyncio.Future()
+        
+        def signal_handler():
+            """Handle stop signals."""
+            logger.info("Stop signal received")
+            if not stop_signal.done():
+                stop_signal.set_result(None)
+
+        # Set up signal handlers
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            asyncio.get_running_loop().add_signal_handler(sig, signal_handler)
+        
+        # Start polling in background
+        application.create_task(application.updater.start_polling(drop_pending_updates=True))
+        
+        # Wait for stop signal
+        try:
+            await stop_signal
+        finally:
+            # Remove signal handlers and shutdown
+            for sig in (signal.SIGINT, signal.SIGTERM):
+                asyncio.get_running_loop().remove_signal_handler(sig)
+            await shutdown(application)
+            
+    except Exception as e:
+        logger.error(f"Error running bot: {e}")
+        await shutdown(application)
 
 if __name__ == "__main__":
-    main()
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("Bot stopped by user")
+    except Exception as e:
+        logger.error(f"Fatal error: {e}")

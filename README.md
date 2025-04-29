@@ -37,11 +37,13 @@ source venv/bin/activate  # En Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-3. Configura el token del bot:
+3. Configura las variables de entorno:
    - Crea un archivo `.env` en la raíz del proyecto
-   - Agrega tu token de bot de Telegram:
+   - Configura las siguientes variables:
      ```
      BOT_TOKEN=tu_token_aquí
+     DOWNLOAD_DIR=src/downloads      # Directorio para descargas temporales
+     SAVED_VIDEOS_DIR=src/saved_videos  # Directorio para videos guardados
      ```
 
 ## Uso
