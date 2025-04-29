@@ -30,14 +30,21 @@ git clone https://github.com/yourusername/multimedia-downloader-bot.git
 cd multimedia-downloader-bot
 ```
 
-2. Crea un entorno virtual e instala las dependencias:
+2. Crea los directorios necesarios para el almacenamiento:
+```bash
+mkdir -p /docker/mediabot/downloads
+mkdir -p /docker/mediabot/saved_videos
+mkdir -p /docker/mediabot/db
+```
+
+3. Crea un entorno virtual e instala las dependencias:
 ```bash
 python -m venv venv
 source venv/bin/activate  # En Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-3. Configura las variables de entorno:
+4. Configura las variables de entorno:
    - Crea un archivo `.env` en la raíz del proyecto
    - Configura las siguientes variables:
      ```

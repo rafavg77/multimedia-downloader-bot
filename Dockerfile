@@ -7,11 +7,16 @@ RUN apt-get update && apt-get install -y \
     ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
-# Crear usuario no root
-RUN useradd -m -u 1000 botuser && \
+# Crear usuario y grupo con IDs dinámicos
+ENV PUID=1000
+ENV PGID=1000
+
+# Crear usuario no root con IDs dinámicos
+RUN groupmod -o -g ${PGID} www-data && \
+    usermod -o -u ${PUID} www-data && \
     mkdir -p /data/downloads /data/saved_videos /data/db && \
-    chown -R botuser:botuser /data && \
-    chown -R botuser:botuser /app
+    chown -R www-data:www-data /data && \
+    chown -R www-data:www-data /app
 
 # Copiar requirements.txt primero para aprovechar la caché de Docker
 COPY requirements.txt .
@@ -20,7 +25,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copiar el código fuente
 COPY src/ ./src/
 
-# Cambiar al usuario no root
-USER botuser
+# Cambiar al usuario www-data
+USER www-data
 
 CMD ["python", "src/bot.py"]

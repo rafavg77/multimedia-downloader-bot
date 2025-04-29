@@ -8,8 +8,11 @@ services:
       - DOWNLOAD_DIR=/data/downloads
       - SAVED_VIDEOS_DIR=/data/saved_videos
       - DB_PATH=/data/db/users.db
+      - PUID=1000
+      - PGID=1000
+      - TZ=America/Monterrey
     volumes:
-      - ./data/downloads:/data/downloads
-      - ./data/saved_videos:/data/saved_videos
-      - ./data/db:/data/db
+      - /docker/mediabot/downloads:/data/downloads
+      - /docker/mediabot/saved_videos:/data/saved_videos
+      - /docker/mediabot/db:/data/db
     restart: unless-stopped
