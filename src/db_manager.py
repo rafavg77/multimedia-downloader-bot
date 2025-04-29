@@ -18,8 +18,15 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 SUPER_ADMIN_CHAT_ID = int(os.getenv('SUPER_ADMIN_CHAT_ID', '0'))
 
-# Database path
-DB_PATH = Path(__file__).parent / "users.db"
+# Get database path from environment variable with default Docker path
+DB_PATH = Path(os.getenv('DB_PATH', '/data/db/users.db')).resolve()
+
+# Ensure database directory exists
+DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+# Database URL
+DATABASE_URL = f"sqlite+aiosqlite:///{DB_PATH}"
+
 db = Database(DB_PATH)
 
 async def init_db():

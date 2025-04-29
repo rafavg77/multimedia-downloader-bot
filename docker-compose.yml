@@ -1,0 +1,15 @@
+services:
+  mediabot:
+    build: .
+    container_name: mediabot
+    environment:
+      - BOT_TOKEN=${BOT_TOKEN}
+      - SUPER_ADMIN_CHAT_ID=${SUPER_ADMIN_CHAT_ID}
+      - DOWNLOAD_DIR=/data/downloads
+      - SAVED_VIDEOS_DIR=/data/saved_videos
+      - DB_PATH=/data/db/users.db
+    volumes:
+      - ./data/downloads:/data/downloads
+      - ./data/saved_videos:/data/saved_videos
+      - ./data/db:/data/db
+    restart: unless-stopped

@@ -60,19 +60,31 @@ saved_dir=${saved_dir:-/var/lib/mediabot/saved_videos}
 # Crear directorio para la base de datos
 data_dir="/var/lib/mediabot/data"
 
-# Crear todos los directorios necesarios
+# Crear todos los directorios necesarios y establecer permisos
 print_step "Creando estructura de directorios"
-mkdir -p "$download_dir"
-mkdir -p "$saved_dir"
-mkdir -p "$data_dir"
-print_success "Directorios creados:\n- $download_dir\n- $saved_dir\n- $data_dir"
+for dir in "$download_dir" "$saved_dir" "$data_dir"; do
+    # Crear directorio y directorios padres si no existen
+    mkdir -p "$dir"
+    
+    # Obtener el directorio padre
+    parent_dir=$(dirname "$dir")
+    
+    # Asegurar que los directorios padre sean ejecutables por otros
+    while [ "$parent_dir" != "/" ]; do
+        chmod a+x "$parent_dir"
+        parent_dir=$(dirname "$parent_dir")
+    done
+    
+    # Establecer propiedad y permisos
+    chown mediabot:mediabot "$dir"
+    if [ "$dir" = "$data_dir" ]; then
+        chmod 700 "$dir"  # Permisos restrictivos para directorio de datos
+    else
+        chmod 755 "$dir"  # Permisos de lectura/escritura para mediabot, lectura para otros
+    fi
+done
 
-# Establecer permisos
-print_step "Estableciendo permisos de directorios"
-chown -R mediabot:mediabot "$download_dir" "$saved_dir" "$data_dir"
-chmod -R 755 "$download_dir" "$saved_dir"
-chmod 700 "$data_dir"
-print_success "Permisos establecidos correctamente"
+print_success "Directorios creados y permisos establecidos:\n- $download_dir\n- $saved_dir\n- $data_dir"
 
 # Crear/actualizar archivo .env
 print_step "Generando archivo de configuración"

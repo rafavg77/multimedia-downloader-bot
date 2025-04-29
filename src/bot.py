@@ -25,20 +25,20 @@ logger = logging.getLogger(__name__)
 # Load environment variables
 load_dotenv()
 
-# Define directories from environment variables
-DOWNLOAD_DIR = Path(os.getenv('DOWNLOAD_DIR')).expanduser().resolve()
-SAVED_VIDEOS_DIR = Path(os.getenv('SAVED_VIDEOS_DIR')).expanduser().resolve()
+# Define directories from environment variables with valores por defecto para Docker
+DOWNLOAD_DIR = Path(os.getenv('DOWNLOAD_DIR', '/data/downloads')).resolve()
+SAVED_VIDEOS_DIR = Path(os.getenv('SAVED_VIDEOS_DIR', '/data/saved_videos')).resolve()
 
 # Get bot token
 TOKEN: Final = os.getenv('BOT_TOKEN')
 if not TOKEN:
-    raise ValueError("No token provided. Set BOT_TOKEN in .env file")
+    raise ValueError("No token provided. Set BOT_TOKEN environment variable")
 
 # Ensure directories exist and have correct permissions
 if not ensure_directories(DOWNLOAD_DIR, SAVED_VIDEOS_DIR):
     raise ValueError(
         f"Error: No se puede acceder a los directorios de descarga.\n"
-        f"Por favor, verifica que las rutas en .env sean correctas y tengan permisos:\n"
+        f"Por favor, verifica que los volúmenes de Docker estén correctamente montados:\n"
         f"DOWNLOAD_DIR={DOWNLOAD_DIR}\n"
         f"SAVED_VIDEOS_DIR={SAVED_VIDEOS_DIR}"
     )

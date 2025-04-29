@@ -73,6 +73,37 @@ multimedia-downloader-bot/
     └── saved_videos/   # Almacenamiento permanente de videos
 ```
 
+## 📋 Ver logs del contenedor
+
+Hay varias formas de ver los logs del contenedor:
+
+1. Ver los logs en tiempo real:
+```bash
+docker logs -f mediabot
+```
+
+2. Ver los últimos N líneas de logs:
+```bash
+docker logs --tail 100 mediabot
+```
+
+3. Ver logs desde una fecha específica:
+```bash
+docker logs --since 2024-04-28T00:00:00Z mediabot
+```
+
+4. En Portainer:
+   - Ve a Containers
+   - Haz clic en el contenedor 'mediabot'
+   - Ve a la pestaña 'Logs'
+   - Puedes activar 'Auto-refresh' para ver los logs en tiempo real
+
+Los logs mostrarán:
+- Errores y excepciones
+- Intentos de acceso no autorizados
+- Descargas exitosas/fallidas de videos
+- Información de inicio/parada del bot
+
 ## Contribuir
 
 1. Haz un fork del repositorio

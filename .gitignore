@@ -179,3 +179,27 @@ src/saved_videos/
 *.pyc
 .env
 *.db
+
+# Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Database
+*.db
+
+# Downloaded media files
+data/downloads/
+data/saved_videos/
+
+# Environment
+.env
+*.env
+
+# IDE
+.vscode/
+.idea/
+
+# System files
+.DS_Store
+Thumbs.db
