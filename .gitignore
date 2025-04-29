@@ -178,3 +178,4 @@ src/downloads/
 src/saved_videos/
 *.pyc
 .env
+*.db

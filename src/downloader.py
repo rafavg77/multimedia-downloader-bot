@@ -23,6 +23,30 @@ def validate_url(url: str) -> bool:
     except Exception:
         return False
 
+def ensure_directories(*dirs: Path) -> bool:
+    """
+    Ensure all required directories exist and are accessible.
+    Returns True if all directories are ready to use, False otherwise.
+    """
+    try:
+        for dir_path in dirs:
+            # Convert to absolute path
+            abs_path = dir_path.expanduser().resolve()
+            # Create directory and parents if they don't exist
+            abs_path.mkdir(parents=True, exist_ok=True)
+            # Verify write permissions by trying to create a test file
+            test_file = abs_path / '.write_test'
+            try:
+                test_file.touch()
+                test_file.unlink()
+            except (PermissionError, OSError):
+                logger.error(f"No hay permisos de escritura en el directorio: {abs_path}")
+                return False
+        return True
+    except Exception as e:
+        logger.error(f"Error al crear/verificar directorios: {e}")
+        return False
+
 async def download_video(url: str, output_dir: Path) -> Tuple[bool, str, Path]:
     """
     Download video from supported platforms using yt-dlp.
@@ -32,20 +56,24 @@ async def download_video(url: str, output_dir: Path) -> Tuple[bool, str, Path]:
     if not validate_url(url):
         return False, "URL no válida o dominio no soportado", Path()
     
+    # Ensure output directory exists and is writable
+    if not ensure_directories(output_dir):
+        return False, f"Error: No se puede acceder al directorio {output_dir}", Path()
+    
     try:
-        # Sanitize output path and create a safe template for yt-dlp
-        safe_dir = str(output_dir)
+        # Convert to absolute path and sanitize
+        safe_dir = str(output_dir.expanduser().resolve())
         safe_template = sanitize_path('%(title)s')
         
         # Prepare the command with sanitized inputs
         cmd = [
             'yt-dlp',
             '--no-warnings',
-            '--restrict-filenames',  # Use only ASCII characters in filenames
+            '--restrict-filenames',
             '-f', 'best',
             '-o', f"{safe_dir}/{safe_template}.%(ext)s",
-            '--no-cache-dir',  # Prevent cache-based attacks
-            '--no-progress',   # Disable progress to prevent terminal escape sequences
+            '--no-cache-dir',
+            '--no-progress',
             url
         ]
         
@@ -80,8 +108,3 @@ async def download_video(url: str, output_dir: Path) -> Tuple[bool, str, Path]:
     except Exception as e:
         logger.error(f"Error downloading video: {e}")
         return False, f"Error: {str(e)}", Path()
-
-def ensure_directories(dirs: list[Path]):
-    """Ensure all required directories exist and have proper permissions."""
-    for dir_path in dirs:
-        dir_path.mkdir(mode=0o755, exist_ok=True)  # Set secure permissions

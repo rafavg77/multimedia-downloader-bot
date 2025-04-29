@@ -44,6 +44,7 @@ pip install -r requirements.txt
      BOT_TOKEN=tu_token_aquí
      DOWNLOAD_DIR=src/downloads      # Directorio para descargas temporales
      SAVED_VIDEOS_DIR=src/saved_videos  # Directorio para videos guardados
+     SUPER_ADMIN_CHAT_ID=
      ```
 
 ## Uso

@@ -17,21 +17,31 @@ from downloader import download_video, ensure_directories
 
 # Enable logging
 logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", 
+    level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
 # Load environment variables
 load_dotenv()
+
+# Define directories from environment variables
+DOWNLOAD_DIR = Path(os.getenv('DOWNLOAD_DIR')).expanduser().resolve()
+SAVED_VIDEOS_DIR = Path(os.getenv('SAVED_VIDEOS_DIR')).expanduser().resolve()
+
+# Get bot token
 TOKEN: Final = os.getenv('BOT_TOKEN')
+if not TOKEN:
+    raise ValueError("No token provided. Set BOT_TOKEN in .env file")
 
-# Define directories
-BASE_DIR = Path(__file__).parent
-DOWNLOAD_DIR = BASE_DIR / os.getenv('DOWNLOAD_DIR', 'downloads')
-SAVED_VIDEOS_DIR = BASE_DIR / os.getenv('SAVED_VIDEOS_DIR', 'saved_videos')
-
-# Ensure directories exist
-ensure_directories([DOWNLOAD_DIR, SAVED_VIDEOS_DIR])
+# Ensure directories exist and have correct permissions
+if not ensure_directories(DOWNLOAD_DIR, SAVED_VIDEOS_DIR):
+    raise ValueError(
+        f"Error: No se puede acceder a los directorios de descarga.\n"
+        f"Por favor, verifica que las rutas en .env sean correctas y tengan permisos:\n"
+        f"DOWNLOAD_DIR={DOWNLOAD_DIR}\n"
+        f"SAVED_VIDEOS_DIR={SAVED_VIDEOS_DIR}"
+    )
 
 async def handle_unauthorized_user(update: Update, command: str = None):
     """Handle unauthorized access attempts."""
