@@ -10,16 +10,35 @@ logger = logging.getLogger(__name__)
 
 def validate_url(url: str) -> bool:
     """Validate URL to ensure it's from a trusted domain."""
-    trusted_domains = {
-        'instagram.com', 'www.instagram.com',
-        'facebook.com', 'www.facebook.com',
-        'tiktok.com', 'www.tiktok.com',
-        'youtube.com', 'www.youtube.com', 'youtu.be'
+    trusted_base_domains = {
+        'instagram.com',
+        'facebook.com',
+        'tiktok.com',
+        'youtube.com',
+        'x.com',
+        'reddit.com',
+        'redd.it',
+    }
+    trusted_exact_hosts = {
+        'youtu.be',
     }
     
     try:
         parsed = urlparse(url)
-        return parsed.netloc.lower() in trusted_domains and parsed.scheme in ('http', 'https')
+        if parsed.scheme not in ('http', 'https'):
+            return False
+
+        host = (parsed.netloc or '').lower()
+        # Strip credentials/port if present
+        if '@' in host:
+            host = host.split('@', 1)[1]
+        if ':' in host:
+            host = host.split(':', 1)[0]
+
+        if host in trusted_exact_hosts:
+            return True
+
+        return any(host == base or host.endswith(f".{base}") for base in trusted_base_domains)
     except Exception:
         return False
 
@@ -70,7 +89,10 @@ async def download_video(url: str, output_dir: Path) -> Tuple[bool, str, Path]:
             'yt-dlp',
             '--no-warnings',
             '--restrict-filenames',
-            '-f', 'best',
+            # Some sites (e.g. Reddit) expose separate video+audio streams.
+            # This selector downloads best video+audio when available, otherwise falls back.
+            '-f', 'bv*+ba/best',
+            '--merge-output-format', 'mp4',
             '-o', f"{safe_dir}/{safe_template}.%(ext)s",
             '--no-cache-dir',
             '--no-progress',
@@ -89,19 +111,17 @@ async def download_video(url: str, output_dir: Path) -> Tuple[bool, str, Path]:
         if process.returncode != 0:
             return False, f"Error: {stderr.decode()}", Path()
             
-        # Find the downloaded file safely
-        files = list(output_dir.glob("*"))
-        if not files:
-            return False, "No se encontró el archivo descargado", Path()
-            
-        # Get the most recently modified file
-        latest_file = max(files, key=lambda x: x.stat().st_mtime)
-        
-        # Validate the file extension
+        # Find the downloaded file safely (avoid picking metadata like .info.json)
         allowed_extensions = {'.mp4', '.mkv', '.webm', '.mov'}
-        if latest_file.suffix.lower() not in allowed_extensions:
-            latest_file.unlink()  # Remove file if extension not allowed
-            return False, "Tipo de archivo no permitido", Path()
+        candidate_files = [
+            p for p in output_dir.iterdir()
+            if p.is_file() and p.suffix.lower() in allowed_extensions
+        ]
+        if not candidate_files:
+            return False, "No se encontró el archivo de video descargado", Path()
+
+        # Get the most recently modified video file
+        latest_file = max(candidate_files, key=lambda x: x.stat().st_mtime)
             
         return True, "Descarga exitosa", latest_file
         

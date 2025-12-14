@@ -30,31 +30,45 @@ git clone https://github.com/yourusername/multimedia-downloader-bot.git
 cd multimedia-downloader-bot
 ```
 
-2. Crea los directorios necesarios para el almacenamiento:
-```bash
-mkdir -p /docker/mediabot/downloads
-mkdir -p /docker/mediabot/saved_videos
-mkdir -p /docker/mediabot/db
-```
-
-3. Crea un entorno virtual e instala las dependencias:
+2. Crea un entorno virtual e instala las dependencias (opcional, si lo ejecutarás sin Docker):
 ```bash
 python -m venv venv
 source venv/bin/activate  # En Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-4. Configura las variables de entorno:
+3. Configura las variables de entorno:
    - Crea un archivo `.env` en la raíz del proyecto
    - Configura las siguientes variables:
      ```
-     BOT_TOKEN=tu_token_aquí
-     DOWNLOAD_DIR=src/downloads      # Directorio para descargas temporales
-     SAVED_VIDEOS_DIR=src/saved_videos  # Directorio para videos guardados
-     SUPER_ADMIN_CHAT_ID=
+  BOT_TOKEN=tu_token_aquí
+  SUPER_ADMIN_CHAT_ID=123456789
+  PUID=1000
+  PGID=1000
+  TZ=America/Monterrey
      ```
 
 ## Uso
+
+### Opción A: Docker Compose (Docker Hub / producción)
+
+Este modo usa `docker-compose.yml` y descarga la imagen desde Docker Hub. También incluye un contenedor `mediabot-init` que crea y ajusta permisos de los volúmenes automáticamente (no necesitas crear carpetas manualmente).
+
+```bash
+docker compose up -d
+docker compose logs -f mediabot
+```
+
+### Opción B: Docker Compose (build local)
+
+Este modo usa `docker-compose.local.yml` y construye la imagen localmente.
+
+```bash
+docker compose -f docker-compose.local.yml up -d --build
+docker compose -f docker-compose.local.yml logs -f mediabot
+```
+
+### Opción C: Ejecutar sin Docker
 
 1. Inicia el bot:
 ```bash
@@ -111,6 +125,29 @@ Los logs mostrarán:
 - Descargas exitosas/fallidas de videos
 - Información de inicio/parada del bot
 
+## 🚀 Publicar imagen en Docker Hub
+
+Requisitos:
+- Tener una cuenta en Docker Hub
+- Tener creado (o permiso sobre) el repositorio `rafavg77/multimedia-downloader-bot`
+
+### Build y Push (latest)
+
+```bash
+docker login
+docker build -t rafavg77/multimedia-downloader-bot:latest .
+docker push rafavg77/multimedia-downloader-bot:latest
+```
+
+### Build y Push con versión (recomendado)
+
+```bash
+VERSION=1.0.0
+docker build -t rafavg77/multimedia-downloader-bot:$VERSION -t rafavg77/multimedia-downloader-bot:latest .
+docker push rafavg77/multimedia-downloader-bot:$VERSION
+docker push rafavg77/multimedia-downloader-bot:latest
+```
+
 ## Contribuir
 
 1. Haz un fork del repositorio
@@ -125,6 +162,6 @@ Este proyecto está licenciado bajo la Licencia MIT - ver el archivo [LICENSE](L
 
 ## Contacto
 
-Tu Nombre - [@tutwitter](https://twitter.com/tutwitter)
+rafavg77 - [@rafavg77](https://x.com/rafavg77)
 
 Link del proyecto: [https://github.com/yourusername/multimedia-downloader-bot](https://github.com/yourusername/multimedia-downloader-bot)

@@ -1,7 +1,13 @@
 services:
   mediabot-init:
-    image: rafavg77/multimedia-downloader-bot:latest
-    pull_policy: always
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        PUID: ${PUID:-1000}
+        PGID: ${PGID:-1000}
+    image: mediabot-local:latest
+    pull_policy: never
     container_name: mediabot-init
     env_file:
       - .env
@@ -23,8 +29,14 @@ services:
         chown -R "${PUID:-1000}:${PGID:-1000}" /data
 
   mediabot:
-    image: rafavg77/multimedia-downloader-bot:latest
-    pull_policy: always
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        PUID: ${PUID:-1000}
+        PGID: ${PGID:-1000}
+    image: mediabot-local:latest
+    pull_policy: never
     container_name: mediabot
     depends_on:
       mediabot-init:

@@ -4,6 +4,7 @@ import asyncio
 import signal
 from typing import Final
 from pathlib import Path
+from urllib.parse import urlparse, urlunparse
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, CallbackQueryHandler, filters
@@ -14,13 +15,6 @@ from db_manager import (
     log_unauthorized_attempt, get_unauthorized_events
 )
 from downloader import download_video, ensure_directories
-
-# Enable logging
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", 
-    level=logging.INFO
-)
-logger = logging.getLogger(__name__)
 
 # Load environment variables
 load_dotenv()
@@ -33,6 +27,76 @@ SAVED_VIDEOS_DIR = Path(os.getenv('SAVED_VIDEOS_DIR', '/data/saved_videos')).res
 TOKEN: Final = os.getenv('BOT_TOKEN')
 if not TOKEN:
     raise ValueError("No token provided. Set BOT_TOKEN environment variable")
+
+def _sanitize_url_for_log(raw_url: str) -> str:
+    """Remove query/fragment to avoid logging sensitive params."""
+    try:
+        parsed = urlparse(raw_url)
+        return urlunparse(parsed._replace(query="", fragment=""))
+    except Exception:
+        return raw_url
+
+class _RedactBotTokenFilter(logging.Filter):
+    def __init__(self, token: str | None):
+        super().__init__()
+        self._token = token or ""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if not self._token:
+            return True
+        try:
+            message = record.getMessage()
+        except Exception:
+            return True
+        if self._token in message:
+            record.msg = message.replace(self._token, "<BOT_TOKEN>")
+            record.args = ()
+        return True
+
+class _SuppressNoisyLibsFilter(logging.Filter):
+    _prefixes = (
+        "httpx",
+        "httpcore",
+        "telegram",
+        "telegram.ext",
+        "apscheduler",
+    )
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.levelno >= logging.WARNING:
+            return True
+        return not record.name.startswith(self._prefixes)
+
+def _setup_logging() -> None:
+    level_name = (os.getenv("LOG_LEVEL") or "INFO").upper()
+    level = getattr(logging, level_name, logging.INFO)
+
+    logging.basicConfig(
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        level=level,
+        force=True,
+    )
+
+    # Silence noisy libraries (and prevent token from appearing in request logs)
+    for noisy_logger in (
+        "httpx",
+        "httpcore",
+        "telegram",
+        "telegram.ext",
+        "apscheduler",
+    ):
+        lib_logger = logging.getLogger(noisy_logger)
+        lib_logger.setLevel(logging.WARNING)
+        lib_logger.propagate = True
+
+    redact_filter = _RedactBotTokenFilter(TOKEN)
+    suppress_filter = _SuppressNoisyLibsFilter()
+    for handler in logging.getLogger().handlers:
+        handler.addFilter(suppress_filter)
+        handler.addFilter(redact_filter)
+
+_setup_logging()
+logger = logging.getLogger(__name__)
 
 # Ensure directories exist and have correct permissions
 if not ensure_directories(DOWNLOAD_DIR, SAVED_VIDEOS_DIR):
@@ -147,6 +211,14 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
 
     url = update.message.text
+    chat_id = update.effective_chat.id
+    username = update.effective_user.username if update.effective_user else None
+    logger.info(
+        "url_received chat_id=%s username=%s url=%s",
+        chat_id,
+        username,
+        _sanitize_url_for_log(url),
+    )
     
     # Store URL in user_data for later use
     context.user_data['current_url'] = url
@@ -182,6 +254,17 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if not url:
         await query.edit_message_text("❌ Lo siento, hubo un error. Por favor, envía el enlace nuevamente.")
         return
+
+    chat_id = query.message.chat_id
+    username = update.effective_user.username if update.effective_user else None
+    action = query.data
+    logger.info(
+        "action_selected chat_id=%s username=%s action=%s url=%s",
+        chat_id,
+        username,
+        action,
+        _sanitize_url_for_log(url),
+    )
     
     message = await query.edit_message_text("⏳ Procesando el enlace...")
     
@@ -199,24 +282,37 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             # Solo enviar
             await message.edit_text("📤 Enviando video...")
             await context.bot.send_video(
-                chat_id=query.message.chat_id,
+                chat_id=chat_id,
                 video=video_path,
                 caption=f"📹 Video descargado"
             )
             # Clean up
             video_path.unlink()
             await message.delete()
+            logger.info(
+                "action_success chat_id=%s username=%s action=%s result=sent",
+                chat_id,
+                username,
+                action,
+            )
         elif query.data == "save":
             # Solo guardar
             await message.edit_text(
                 f"✅ Video guardado exitosamente como:\n"
                 f"`{video_path.name}`"
             )
+            logger.info(
+                "action_success chat_id=%s username=%s action=%s result=saved file=%s",
+                chat_id,
+                username,
+                action,
+                video_path.name,
+            )
         else:  # save_and_send
             # Guardar y enviar
             await message.edit_text("📤 Enviando video...")
             await context.bot.send_video(
-                chat_id=query.message.chat_id,
+                chat_id=chat_id,
                 video=video_path,
                 caption=f"📹 Video guardado como:\n`{video_path.name}`"
             )
@@ -224,9 +320,22 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 f"✅ Video guardado y enviado exitosamente como:\n"
                 f"`{video_path.name}`"
             )
+            logger.info(
+                "action_success chat_id=%s username=%s action=%s result=saved_and_sent file=%s",
+                chat_id,
+                username,
+                action,
+                video_path.name,
+            )
             
     except Exception as e:
-        logger.error(f"Error processing video: {e}")
+        logger.warning(
+            "action_failed chat_id=%s username=%s action=%s error=%s",
+            query.message.chat_id,
+            update.effective_user.username if update.effective_user else None,
+            query.data,
+            str(e),
+        )
         await message.edit_text(
             "❌ Lo siento, ocurrió un error al procesar el video. "
             "Por favor, verifica que el enlace sea válido."

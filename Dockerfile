@@ -8,8 +8,10 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Crear usuario y grupo con IDs dinámicos
-ENV PUID=1000
-ENV PGID=1000
+ARG PUID=1000
+ARG PGID=1000
+ENV PUID=${PUID}
+ENV PGID=${PGID}
 
 # Crear usuario no root con IDs dinámicos
 RUN groupmod -o -g ${PGID} www-data && \
