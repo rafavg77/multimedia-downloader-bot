@@ -3,8 +3,6 @@ services:
     image: rafavg77/multimedia-downloader-bot:latest
     pull_policy: always
     container_name: mediabot-init
-    env_file:
-      - .env
     environment:
       - PUID=${PUID:-1000}
       - PGID=${PGID:-1000}
@@ -29,11 +27,9 @@ services:
     depends_on:
       mediabot-init:
         condition: service_completed_successfully
-    env_file:
-      - .env
     environment:
-      - BOT_TOKEN=${BOT_TOKEN}
-      - SUPER_ADMIN_CHAT_ID=${SUPER_ADMIN_CHAT_ID}
+      - BOT_TOKEN=${BOT_TOKEN:?Set BOT_TOKEN in Portainer stack env vars}
+      - SUPER_ADMIN_CHAT_ID=${SUPER_ADMIN_CHAT_ID:-}
       - DOWNLOAD_DIR=/data/downloads
       - SAVED_VIDEOS_DIR=/data/saved_videos
       - DB_PATH=/data/db/users.db

@@ -8,6 +8,64 @@ from models import sanitize_path
 
 logger = logging.getLogger(__name__)
 
+TRANSCODE_FOR_TELEGRAM = (str(__import__("os").getenv("TRANSCODE_FOR_TELEGRAM", "1")).lower() not in {"0", "false", "no"})
+FFMPEG_CRF = __import__("os").getenv("FFMPEG_CRF", "23")
+FFMPEG_PRESET = __import__("os").getenv("FFMPEG_PRESET", "veryfast")
+
+async def transcode_to_telegram_mp4(input_path: Path) -> Tuple[bool, str, Path]:
+    """Transcode to a Telegram-friendly MP4 (H.264/AAC, yuv420p).
+
+    Many sources deliver AV1/HEVC which some Telegram clients show as a still frame + audio.
+    """
+    if not TRANSCODE_FOR_TELEGRAM:
+        return True, "transcode disabled", input_path
+
+    try:
+        src = input_path.expanduser().resolve()
+        if not src.exists() or not src.is_file():
+            return False, "input file not found", input_path
+
+        out_path = src.with_name(f"{src.stem}_tg.mp4")
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(src),
+            "-c:v",
+            "libx264",
+            "-preset",
+            str(FFMPEG_PRESET),
+            "-crf",
+            str(FFMPEG_CRF),
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "128k",
+            "-movflags",
+            "+faststart",
+            str(out_path),
+        ]
+
+        process = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await process.communicate()
+        if process.returncode != 0:
+            msg = stderr.decode(errors="ignore").strip()[-800:]
+            return False, f"ffmpeg transcode failed: {msg}", input_path
+
+        if not out_path.exists() or out_path.stat().st_size == 0:
+            return False, "ffmpeg produced empty output", input_path
+
+        return True, "transcoded", out_path
+    except Exception as e:
+        logger.error(f"Error transcoding video: {e}")
+        return False, f"transcode error: {e}", input_path
+
 def validate_url(url: str) -> bool:
     """Validate URL to ensure it's from a trusted domain."""
     trusted_base_domains = {

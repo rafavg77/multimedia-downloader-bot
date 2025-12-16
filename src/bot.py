@@ -5,6 +5,7 @@ import signal
 from typing import Final
 from pathlib import Path
 from urllib.parse import urlparse, urlunparse
+from telegram.error import BadRequest
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, CallbackQueryHandler, filters
@@ -14,7 +15,7 @@ from db_manager import (
     init_db, is_user_authorized, is_super_admin, add_authorized_user, 
     log_unauthorized_attempt, get_unauthorized_events
 )
-from downloader import download_video, ensure_directories
+from downloader import download_video, ensure_directories, transcode_to_telegram_mp4
 
 # Load environment variables
 load_dotenv()
@@ -97,6 +98,14 @@ def _setup_logging() -> None:
 
 _setup_logging()
 logger = logging.getLogger(__name__)
+
+def _file_size_mb(path: Path) -> float:
+    try:
+        return path.stat().st_size / (1024 * 1024)
+    except Exception:
+        return 0.0
+
+TELEGRAM_MAX_UPLOAD_MB = float(os.getenv("TELEGRAM_MAX_UPLOAD_MB", "45"))
 
 # Ensure directories exist and have correct permissions
 if not ensure_directories(DOWNLOAD_DIR, SAVED_VIDEOS_DIR):
@@ -281,13 +290,68 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         if query.data == "send":
             # Solo enviar
             await message.edit_text("📤 Enviando video...")
-            await context.bot.send_video(
-                chat_id=chat_id,
-                video=video_path,
-                caption=f"📹 Video descargado"
-            )
+            # Make it Telegram-friendly (avoid still-frame+audio issues)
+            ok, _, send_path = await transcode_to_telegram_mp4(video_path)
+            if not ok:
+                send_path = video_path
+
+            size_mb = _file_size_mb(send_path)
+            if size_mb > TELEGRAM_MAX_UPLOAD_MB:
+                # Clean up (send-only should not keep large files)
+                try:
+                    if send_path != video_path:
+                        send_path.unlink()
+                    video_path.unlink()
+                except Exception:
+                    pass
+                logger.warning(
+                    "action_failed chat_id=%s username=%s action=%s error=file_too_large size_mb=%.2f limit_mb=%.2f",
+                    chat_id,
+                    username,
+                    action,
+                    size_mb,
+                    TELEGRAM_MAX_UPLOAD_MB,
+                )
+                await message.edit_text(
+                    f"⚠️ El video pesa {size_mb:.2f} MB y excede el límite de envío del bot (≈{TELEGRAM_MAX_UPLOAD_MB:.0f} MB).\n"
+                    "Usa la opción 'Descargar y guardar' para conservarlo en el servidor."
+                )
+                return
+
+            try:
+                await context.bot.send_video(
+                    chat_id=chat_id,
+                    video=send_path,
+                    caption=f"📹 Video descargado"
+                )
+            except BadRequest as e:
+                if "Request Entity Too Large" in str(e):
+                    # Clean up
+                    try:
+                        if send_path != video_path:
+                            send_path.unlink()
+                        video_path.unlink()
+                    except Exception:
+                        pass
+                    logger.warning(
+                        "action_failed chat_id=%s username=%s action=%s error=telegram_413 size_mb=%.2f",
+                        chat_id,
+                        username,
+                        action,
+                        size_mb,
+                    )
+                    await message.edit_text(
+                        "⚠️ Telegram rechazó el envío por tamaño (413).\n"
+                        "Usa la opción 'Descargar y guardar' para conservarlo en el servidor."
+                    )
+                    return
+                raise
             # Clean up
-            video_path.unlink()
+            try:
+                if send_path != video_path:
+                    send_path.unlink()
+            finally:
+                video_path.unlink()
             await message.delete()
             logger.info(
                 "action_success chat_id=%s username=%s action=%s result=sent",
@@ -311,11 +375,55 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         else:  # save_and_send
             # Guardar y enviar
             await message.edit_text("📤 Enviando video...")
-            await context.bot.send_video(
-                chat_id=chat_id,
-                video=video_path,
-                caption=f"📹 Video guardado como:\n`{video_path.name}`"
-            )
+            ok, _, send_path = await transcode_to_telegram_mp4(video_path)
+            if ok and send_path != video_path:
+                # Replace saved file with Telegram-friendly one to avoid keeping two copies
+                try:
+                    video_path.unlink()
+                except Exception:
+                    pass
+                video_path = send_path
+
+            size_mb = _file_size_mb(video_path)
+            if size_mb > TELEGRAM_MAX_UPLOAD_MB:
+                # Keep file (it's in SAVED_VIDEOS_DIR)
+                logger.warning(
+                    "action_failed chat_id=%s username=%s action=%s error=file_too_large size_mb=%.2f limit_mb=%.2f file=%s",
+                    chat_id,
+                    username,
+                    action,
+                    size_mb,
+                    TELEGRAM_MAX_UPLOAD_MB,
+                    video_path.name,
+                )
+                await message.edit_text(
+                    f"✅ Video guardado como:\n`{video_path.name}`\n\n"
+                    f"⚠️ No se pudo reenviar: pesa {size_mb:.2f} MB y excede el límite de Telegram (≈{TELEGRAM_MAX_UPLOAD_MB:.0f} MB)."
+                )
+                return
+
+            try:
+                await context.bot.send_video(
+                    chat_id=chat_id,
+                    video=video_path,
+                    caption=f"📹 Video guardado como:\n`{video_path.name}`"
+                )
+            except BadRequest as e:
+                if "Request Entity Too Large" in str(e):
+                    logger.warning(
+                        "action_failed chat_id=%s username=%s action=%s error=telegram_413 size_mb=%.2f file=%s",
+                        chat_id,
+                        username,
+                        action,
+                        size_mb,
+                        video_path.name,
+                    )
+                    await message.edit_text(
+                        f"✅ Video guardado como:\n`{video_path.name}`\n\n"
+                        "⚠️ Telegram rechazó el envío por tamaño (413)."
+                    )
+                    return
+                raise
             await message.edit_text(
                 f"✅ Video guardado y enviado exitosamente como:\n"
                 f"`{video_path.name}`"

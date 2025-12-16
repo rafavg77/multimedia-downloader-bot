@@ -59,6 +59,29 @@ docker compose up -d
 docker compose logs -f mediabot
 ```
 
+#### Portainer (Stack)
+
+En Portainer, el archivo `.env` no existe automáticamente en la carpeta interna del stack (`/data/compose/...`). Por eso, para que funcione:
+
+- Ve a tu Stack → **Environment variables**
+- Agrega al menos:
+   - `BOT_TOKEN`
+   - `SUPER_ADMIN_CHAT_ID` (opcional si tu bot lo requiere)
+   - `PUID` (default 1000)
+   - `PGID` (default 1000)
+   - `TZ` (ej. `America/Monterrey`)
+
+Luego redeploy del stack.
+
+#### Producción sin Portainer (con archivo `.env`)
+
+Si lo ejecutas en un servidor con Docker Compose “normal” y quieres usar un archivo `.env`, usa:
+
+```bash
+docker compose --env-file .env up -d
+docker compose logs -f mediabot
+```
+
 ### Opción B: Docker Compose (build local)
 
 Este modo usa `docker-compose.local.yml` y construye la imagen localmente.
@@ -164,4 +187,4 @@ Este proyecto está licenciado bajo la Licencia MIT - ver el archivo [LICENSE](L
 
 rafavg77 - [@rafavg77](https://x.com/rafavg77)
 
-Link del proyecto: [https://github.com/yourusername/multimedia-downloader-bot](https://github.com/yourusername/multimedia-downloader-bot)
+Link del proyecto: [https://github.com/rafavg77/multimedia-downloader-bot](https://github.com/rafavg77/multimedia-downloader-bot)
