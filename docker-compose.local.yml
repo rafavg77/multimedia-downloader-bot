@@ -26,7 +26,8 @@ services:
       - |
         set -e
         mkdir -p /data/downloads /data/saved_videos /data/db
-        chown -R "${PUID:-1000}:${PGID:-1000}" /data
+        # En NFS es común que falle el chown (root_squash). No debe tumbar el init.
+        chown -R "${PUID:-1000}:${PGID:-1000}" /data || true
 
   mediabot:
     build:

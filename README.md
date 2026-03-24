@@ -46,7 +46,22 @@ pip install -r requirements.txt
   PUID=1000
   PGID=1000
   TZ=America/Monterrey
+
+   # Opcionales (recomendado para producción)
+   LOG_LEVEL=INFO
+   # Límite “seguro” para evitar 413 al enviar a Telegram
+   TELEGRAM_MAX_UPLOAD_MB=45
+
+   # Transcodificación para compatibilidad con Telegram
+   # (evita el caso “primer frame estático + audio” con algunos codecs)
+   TRANSCODE_FOR_TELEGRAM=1
+   FFMPEG_CRF=23
+   FFMPEG_PRESET=veryfast
      ```
+
+Notas:
+- Si tu token llegó a aparecer en logs alguna vez, regénéralo en BotFather.
+- `TRANSCODE_FOR_TELEGRAM=1` convierte a MP4 H.264/AAC antes de enviar a Telegram.
 
 ## Uso
 
@@ -59,21 +74,118 @@ docker compose up -d
 docker compose logs -f mediabot
 ```
 
-#### Portainer (Stack)
+### 📺 Guardar descargas en Raspberry Pi (DLNA)
 
-En Portainer, el archivo `.env` no existe automáticamente en la carpeta interna del stack (`/data/compose/...`). Por eso, para que funcione:
+Si no quieres que la opción “Descargar y enviar” use el disco del contenedor/host y prefieres que los archivos se guarden en tu Raspberry Pi (carpeta del servidor DLNA), lo ideal es montar una carpeta remota (NFS o SMB) y mapearla a `/data/downloads`.
 
-- Ve a tu Stack → **Environment variables**
-- Agrega al menos:
-   - `BOT_TOKEN`
-   - `SUPER_ADMIN_CHAT_ID` (opcional si tu bot lo requiere)
-   - `PUID` (default 1000)
-   - `PGID` (default 1000)
-   - `TZ` (ej. `America/Monterrey`)
+Hay 2 formas comunes:
 
-Luego redeploy del stack.
+#### Opción 1: Montar en el host (recomendado)
 
-#### Producción sin Portainer (con archivo `.env`)
+1) Monta la carpeta DLNA del Raspberry en el host donde corre Docker, por ejemplo a `/mnt/dlna`.
+
+2) Cambia el bind-mount de downloads en tu compose para apuntar a ese mount:
+
+```yaml
+services:
+   mediabot:
+      volumes:
+         - /mnt/dlna:/data/downloads
+```
+
+De esta forma, todo lo que caiga en `/data/downloads` se guarda físicamente en el Raspberry.
+
+#### Opción 2: Volumen Docker con NFS
+
+Ejemplo (ajusta `PI_IP` y `EXPORT_PATH`):
+
+```yaml
+volumes:
+   dlna_downloads:
+      driver: local
+      driver_opts:
+         type: nfs
+         o: addr=PI_IP,rw,nolock,soft
+         device: ":/EXPORT_PATH"
+
+services:
+   mediabot:
+      volumes:
+         - dlna_downloads:/data/downloads
+```
+
+Importante:
+- DLNA normalmente requiere que los videos queden dentro de la carpeta que el servidor DLNA indexa (por ejemplo `/srv/dlna/videos`). Esa es la ruta que debes exportar/montar.
+- Si usas NFS/SMB, asegúrate de que los permisos permitan escritura por `PUID/PGID`.
+
+##### ✅ Ejemplo NFS con tu Raspberry
+
+Tu DLNA indexa la carpeta:
+- `/home/tota77/Videos` (según `media_dir=V,/home/tota77/Videos`)
+
+Este repo incluye un override listo para NFS:
+- [docker-compose.nfs.yml](docker-compose.nfs.yml)
+
+Variables usadas por el override:
+- `NFS_SERVER` (obligatoria): IP/host del servidor NFS
+- `NFS_EXPORT_DOWNLOADS` (obligatoria): ruta exportada para `/data/downloads`
+- `NFS_EXPORT_SAVED_VIDEOS` (obligatoria): ruta exportada para `/data/saved_videos`
+- `NFS_VERS` (opcional): versión NFS, default `4`
+
+1) En el Raspberry, crea las carpetas destino (deben existir para poder montar por NFS):
+
+```bash
+mkdir -p /home/tota77/Videos/mediabot/downloads
+mkdir -p /home/tota77/Videos/mediabot/saved_videos
+```
+
+2) En el Raspberry, exporta la ruta por NFS (ejemplo básico en `/etc/exports`). Ajusta la red/IP a tu caso:
+
+```text
+/home/tota77/Videos 192.168.68.0/24(rw,sync,no_subtree_check)
+```
+
+Luego aplica los exports:
+
+```bash
+sudo exportfs -ra
+```
+
+3) En el host donde corre Docker, asegúrate de tener soporte de NFS (en Debian/Ubuntu suele ser `nfs-common`).
+
+4) Levanta el stack usando el override:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.nfs.yml up -d
+docker compose logs -f mediabot
+```
+
+##### ✅ Si ya montaste el NFS en el host (bind-mount)
+
+Si el NFS ya está montado en tu servidor (por ejemplo en `/mnt/raspi_videos`), usa el override de bind-mount:
+- [docker-compose.nfs.bind.yml](docker-compose.nfs.bind.yml)
+
+1) Verifica que el mount existe:
+
+```bash
+mount | grep -i nfs
+df -h | grep -i nfs
+```
+
+2) Exporta la variable `NFS_MOUNT_BASE` (o ponla en tu `.env`):
+
+```bash
+export NFS_MOUNT_BASE=/mnt/raspi_videos
+```
+
+3) Levanta el stack:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.nfs.bind.yml up -d
+docker compose logs -f mediabot
+```
+
+#### Producción (con archivo `.env`)
 
 Si lo ejecutas en un servidor con Docker Compose “normal” y quieres usar un archivo `.env`, usa:
 
@@ -135,12 +247,6 @@ docker logs --tail 100 mediabot
 ```bash
 docker logs --since 2024-04-28T00:00:00Z mediabot
 ```
-
-4. En Portainer:
-   - Ve a Containers
-   - Haz clic en el contenedor 'mediabot'
-   - Ve a la pestaña 'Logs'
-   - Puedes activar 'Auto-refresh' para ver los logs en tiempo real
 
 Los logs mostrarán:
 - Errores y excepciones

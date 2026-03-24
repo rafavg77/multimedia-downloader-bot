@@ -1,0 +1,19 @@
+# Override Compose para usar un NFS YA montado en el host (bind-mount).
+# Uso:
+#   docker compose -f docker-compose.yml -f docker-compose.nfs.bind.yml up -d
+#   docker compose logs -f mediabot
+#
+# Requiere que en el host exista ${NFS_MOUNT_BASE} apuntando al mount NFS.
+
+services:
+  mediabot-init:
+    volumes:
+      - ${NFS_MOUNT_BASE:?Set NFS_MOUNT_BASE}/mediabot/downloads:/data/downloads
+      - ${NFS_MOUNT_BASE:?Set NFS_MOUNT_BASE}/mediabot/saved_videos:/data/saved_videos
+      - /docker/mediabot/db:/data/db
+
+  mediabot:
+    volumes:
+      - ${NFS_MOUNT_BASE:?Set NFS_MOUNT_BASE}/mediabot/downloads:/data/downloads
+      - ${NFS_MOUNT_BASE:?Set NFS_MOUNT_BASE}/mediabot/saved_videos:/data/saved_videos
+      - /docker/mediabot/db:/data/db

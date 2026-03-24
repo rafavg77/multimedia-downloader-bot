@@ -1,10 +1,8 @@
 import logging
 import asyncio
-import re
 from pathlib import Path
 from typing import Tuple
 from urllib.parse import urlparse
-from models import sanitize_path
 
 logger = logging.getLogger(__name__)
 
@@ -140,7 +138,12 @@ async def download_video(url: str, output_dir: Path) -> Tuple[bool, str, Path]:
     try:
         # Convert to absolute path and sanitize
         safe_dir = str(output_dir.expanduser().resolve())
-        safe_template = sanitize_path('%(title)s')
+        # IMPORTANT:
+        # Do NOT sanitize yt-dlp templates with slugify.
+        # If you sanitize "%(title)s" it becomes a literal like "title_s" and every file
+        # will be named "title_s.mp4".
+        # yt-dlp + --restrict-filenames already produces safe filenames.
+        outtmpl = f"{safe_dir}/%(title).200B-%(id)s.%(ext)s"
         
         # Prepare the command with sanitized inputs
         cmd = [
@@ -151,7 +154,7 @@ async def download_video(url: str, output_dir: Path) -> Tuple[bool, str, Path]:
             # This selector downloads best video+audio when available, otherwise falls back.
             '-f', 'bv*+ba/best',
             '--merge-output-format', 'mp4',
-            '-o', f"{safe_dir}/{safe_template}.%(ext)s",
+            '-o', outtmpl,
             '--no-cache-dir',
             '--no-progress',
             url
