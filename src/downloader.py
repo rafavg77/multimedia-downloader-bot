@@ -30,10 +30,50 @@ FLIXGAZE_PLAYER_RE = re.compile(
     re.IGNORECASE,
 )
 
+async def probe_video_metadata(input_path: Path) -> dict[str, int]:
+    """Return width/height/duration metadata for Telegram uploads."""
+    try:
+        src = input_path.expanduser().resolve()
+        cmd = [
+            "ffprobe",
+            "-v", "error",
+            "-select_streams", "v:0",
+            "-show_entries", "stream=width,height:format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=0",
+            str(src),
+        ]
+        process = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await process.communicate()
+        if process.returncode != 0:
+            return {}
+
+        metadata: dict[str, int] = {}
+        for line in stdout.decode(errors="ignore").splitlines():
+            if "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            try:
+                if key in {"width", "height"}:
+                    metadata[key] = int(float(value))
+                elif key == "duration":
+                    metadata[key] = max(1, int(float(value)))
+            except (TypeError, ValueError):
+                continue
+        return metadata
+    except Exception as e:
+        logger.warning(f"Could not probe video metadata for {input_path}: {e}")
+        return {}
+
+
 async def transcode_to_telegram_mp4(input_path: Path) -> Tuple[bool, str, Path]:
     """Transcode to a Telegram-friendly MP4 (H.264/AAC, yuv420p).
 
     Many sources deliver AV1/HEVC which some Telegram clients show as a still frame + audio.
+    The explicit scale/setsar filter preserves the display aspect ratio for vertical videos.
     """
     if not TRANSCODE_FOR_TELEGRAM:
         return True, "transcode disabled", input_path
@@ -55,6 +95,8 @@ async def transcode_to_telegram_mp4(input_path: Path) -> Tuple[bool, str, Path]:
             str(FFMPEG_PRESET),
             "-crf",
             str(FFMPEG_CRF),
+            "-vf",
+            "scale=trunc(iw*sar/2)*2:trunc(ih/2)*2,setsar=1",
             "-pix_fmt",
             "yuv420p",
             "-c:a",

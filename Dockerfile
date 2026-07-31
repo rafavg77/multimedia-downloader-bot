@@ -28,8 +28,8 @@ RUN groupmod -o -g ${PGID} www-data && \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copiar el código fuente
-COPY src/ ./src/
+# Copiar el código fuente con permisos del usuario de ejecución
+COPY --chown=www-data:www-data src/ ./src/
 
 # Cambiar al usuario www-data
 USER www-data

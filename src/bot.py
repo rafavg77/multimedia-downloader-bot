@@ -19,7 +19,7 @@ from db_manager import (
     remove_authorized_user, list_authorized_users, log_unauthorized_attempt,
     get_unauthorized_events
 )
-from downloader import download_video, ensure_directories, transcode_to_telegram_mp4
+from downloader import download_video, ensure_directories, probe_video_metadata, transcode_to_telegram_mp4
 
 # Load environment variables
 load_dotenv()
@@ -108,6 +108,11 @@ def _file_size_mb(path: Path) -> float:
         return path.stat().st_size / (1024 * 1024)
     except Exception:
         return 0.0
+
+
+async def _telegram_video_kwargs(path: Path) -> dict[str, int]:
+    metadata = await probe_video_metadata(path)
+    return {key: value for key, value in metadata.items() if key in {"width", "height", "duration"} and value}
 
 TELEGRAM_MAX_UPLOAD_MB = float(os.getenv("TELEGRAM_MAX_UPLOAD_MB", "45"))
 STARTUP_NOTIFY_CHAT_ID = int(os.getenv("STARTUP_NOTIFY_CHAT_ID") or os.getenv("SUPER_ADMIN_CHAT_ID") or "0")
@@ -655,11 +660,15 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 )
                 return
 
+            video_kwargs = await _telegram_video_kwargs(send_path)
             try:
                 await context.bot.send_video(
                     chat_id=chat_id,
                     video=send_path,
-                    caption=f"📹 Video descargado"
+                    caption=f"📹 Video descargado",
+                    width=video_kwargs.get("width"),
+                    height=video_kwargs.get("height"),
+                    duration=video_kwargs.get("duration"),
                 )
             except BadRequest as e:
                 if "Request Entity Too Large" in str(e):
@@ -739,11 +748,15 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 )
                 return
 
+            video_kwargs = await _telegram_video_kwargs(video_path)
             try:
                 await context.bot.send_video(
                     chat_id=chat_id,
                     video=video_path,
-                    caption=f"📹 Video guardado como:\n`{video_path.name}`"
+                    caption=f"📹 Video guardado como:\n`{video_path.name}`",
+                    width=video_kwargs.get("width"),
+                    height=video_kwargs.get("height"),
+                    duration=video_kwargs.get("duration"),
                 )
             except BadRequest as e:
                 if "Request Entity Too Large" in str(e):
