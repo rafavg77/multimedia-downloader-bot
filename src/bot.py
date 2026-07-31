@@ -115,6 +115,11 @@ SEND_STARTUP_NOTIFICATION = str(os.getenv("SEND_STARTUP_NOTIFICATION", "0")).low
 
 IPINFO_URL = "https://ipinfo.io/json"
 NETWORK_INFO_CALLBACKS = {"show_private_ip", "show_public_ip"}
+ADMIN_ADD_STATE_KEY = "admin_add_user_state"
+ADMIN_ADD_DRAFT_KEY = "admin_add_user_draft"
+ADMIN_ADD_STATE_NAME = "name"
+ADMIN_ADD_STATE_CHAT_ID = "chat_id"
+ADMIN_ADD_STATE_ROLE = "role"
 
 
 def _startup_keyboard() -> InlineKeyboardMarkup:
@@ -250,6 +255,23 @@ def _admin_users_menu() -> InlineKeyboardMarkup:
     ])
 
 
+def _admin_role_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("👤 Usuario", callback_data="admin_add_role_user")],
+        [InlineKeyboardButton("👑 Admin", callback_data="admin_add_role_admin")],
+        [InlineKeyboardButton("❌ Cancelar", callback_data="admin_add_cancel")],
+    ])
+
+
+def _admin_cancel_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancelar", callback_data="admin_add_cancel")]])
+
+
+def _clear_admin_add_flow(context: ContextTypes.DEFAULT_TYPE) -> None:
+    context.user_data.pop(ADMIN_ADD_STATE_KEY, None)
+    context.user_data.pop(ADMIN_ADD_DRAFT_KEY, None)
+
+
 def _role_label(is_admin: bool) -> str:
     return "admin" if is_admin else "usuario"
 
@@ -346,6 +368,67 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "- FlixGaze (stream HLS del reproductor)"
     )
 
+async def handle_admin_add_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Handle step-by-step admin user creation from chat text."""
+    state = context.user_data.get(ADMIN_ADD_STATE_KEY)
+    if not state:
+        return False
+
+    if not await is_super_admin(update.effective_chat.id):
+        _clear_admin_add_flow(context)
+        await handle_unauthorized_user(update, "admin_add_flow")
+        return True
+
+    text = (update.message.text or "").strip()
+    if text.lower() in {"cancelar", "cancel", "/cancel"}:
+        _clear_admin_add_flow(context)
+        await update.message.reply_text("Operación cancelada.", reply_markup=_admin_users_menu())
+        return True
+
+    draft = context.user_data.setdefault(ADMIN_ADD_DRAFT_KEY, {})
+
+    if state == ADMIN_ADD_STATE_NAME:
+        if not text:
+            await update.message.reply_text("Mándame un nombre o alias válido.", reply_markup=_admin_cancel_keyboard())
+            return True
+        draft["name"] = text.lstrip("@")
+        context.user_data[ADMIN_ADD_STATE_KEY] = ADMIN_ADD_STATE_CHAT_ID
+        await update.message.reply_text(
+            "Perfecto. Ahora envíame el *Telegram ID numérico* del usuario.\n\n"
+            "Nota: para autorizar de forma confiable Telegram requiere el ID; el @username por sí solo no alcanza.",
+            reply_markup=_admin_cancel_keyboard(),
+            parse_mode="Markdown",
+        )
+        return True
+
+    if state == ADMIN_ADD_STATE_CHAT_ID:
+        try:
+            chat_id = int(text)
+        except ValueError:
+            await update.message.reply_text(
+                "Ese valor no parece un Telegram ID numérico. Envíame solo números, por ejemplo: `123456789`.",
+                reply_markup=_admin_cancel_keyboard(),
+                parse_mode="Markdown",
+            )
+            return True
+        draft["chat_id"] = chat_id
+        context.user_data[ADMIN_ADD_STATE_KEY] = ADMIN_ADD_STATE_ROLE
+        await update.message.reply_text(
+            f"Listo. ¿Qué rol tendrá `{chat_id}`?",
+            reply_markup=_admin_role_keyboard(),
+            parse_mode="Markdown",
+        )
+        return True
+
+    return False
+
+
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if await handle_admin_add_text(update, context):
+        return
+    await update.message.reply_text("Envíame un enlace de video válido o usa /start para ver el menú.")
+
+
 async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle incoming URLs and show action options."""
     if not await is_user_authorized(update.effective_chat.id):
@@ -420,14 +503,28 @@ async def _handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_T
     if query.data == "admin_users_menu":
         await query.edit_message_text("👥 *Administración de usuarios*", reply_markup=_admin_users_menu(), parse_mode="Markdown")
     elif query.data == "admin_add_user":
+        context.user_data[ADMIN_ADD_STATE_KEY] = ADMIN_ADD_STATE_NAME
+        context.user_data[ADMIN_ADD_DRAFT_KEY] = {}
         await query.edit_message_text(
             "➕ *Agregar/actualizar usuario*\n\n"
-            "Envíame en esta conversación:\n"
-            "`/admin <telegram_id> <username> <user|admin>`\n\n"
-            "Ejemplo:\n"
-            "`/admin 123456789 rafa user`\n\n"
-            "Para borrar:\n"
-            "`/admin remove 123456789`",
+            "Primero envíame el *nombre o alias* de la persona.",
+            reply_markup=_admin_cancel_keyboard(),
+            parse_mode="Markdown",
+        )
+    elif query.data == "admin_add_cancel":
+        _clear_admin_add_flow(context)
+        await query.edit_message_text("Operación cancelada.", reply_markup=_admin_users_menu())
+    elif query.data in {"admin_add_role_user", "admin_add_role_admin"}:
+        draft = context.user_data.get(ADMIN_ADD_DRAFT_KEY) or {}
+        if context.user_data.get(ADMIN_ADD_STATE_KEY) != ADMIN_ADD_STATE_ROLE or "chat_id" not in draft:
+            await query.answer("No hay un alta de usuario en curso.", show_alert=True)
+            return True
+        is_super = query.data == "admin_add_role_admin"
+        await add_authorized_user(int(draft["chat_id"]), draft.get("name"), is_super)
+        _clear_admin_add_flow(context)
+        await query.edit_message_text(
+            f"✅ Usuario `{draft['chat_id']}` guardado como *{_role_label(is_super)}*.\n"
+            f"Nombre/alias: {draft.get('name') or 'sin nombre'}",
             reply_markup=_admin_users_menu(),
             parse_mode="Markdown",
         )
@@ -723,6 +820,7 @@ async def main() -> None:
             handle_url
         )
     )
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     application.add_handler(CallbackQueryHandler(button_callback))
 
     try:
