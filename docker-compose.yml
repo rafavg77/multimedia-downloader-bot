@@ -18,7 +18,7 @@ services:
 
   mediabot-init:
     image: rafavg77/multimedia-downloader-bot:latest
-    pull_policy: always
+    pull_policy: never
     container_name: mediabot-init
     environment:
       - PUID=${PUID:-1000}
@@ -39,7 +39,7 @@ services:
 
   mediabot:
     image: rafavg77/multimedia-downloader-bot:latest
-    pull_policy: always
+    pull_policy: never
     container_name: mediabot
     depends_on:
       mediabot-init:
