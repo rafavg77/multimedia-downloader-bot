@@ -1,120 +1,116 @@
 import logging
 import os
 from pathlib import Path
-from dotenv import load_dotenv
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
-from datetime import datetime
+from contextlib import asynccontextmanager
+from typing import AsyncGenerator
 
-from models import (
-    Database, AuthorizedUser, UnauthorizedEvent,
-    UserCreate, User, Event, EventBase,
-    sanitize_text, sanitize_command
-)
+from dotenv import load_dotenv
+from sqlalchemy import delete, select
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.orm import sessionmaker
+
+from models import Base, AuthorizedUser, UnauthorizedEvent, UserCreate, Event, EventBase, sanitize_text, sanitize_command
 
 logger = logging.getLogger(__name__)
-
-# Load environment variables
 load_dotenv()
-SUPER_ADMIN_CHAT_ID = int(os.getenv('SUPER_ADMIN_CHAT_ID', '0'))
 
-# Get database path from environment variable with default Docker path
-DB_PATH = Path(os.getenv('DB_PATH', '/data/db/users.db')).resolve()
+SUPER_ADMIN_CHAT_ID = int(os.getenv("SUPER_ADMIN_CHAT_ID", "0") or "0")
+DB_PATH = Path(os.getenv("DB_PATH", "/data/db/users.db")).resolve()
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 
-# Ensure database directory exists
-DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+if not DATABASE_URL:
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    DATABASE_URL = f"sqlite+aiosqlite:///{DB_PATH}"
+elif DATABASE_URL.startswith("postgresql://"):
+    DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://", 1)
 
-# Database URL
-DATABASE_URL = f"sqlite+aiosqlite:///{DB_PATH}"
+engine = create_async_engine(DATABASE_URL, echo=False, future=True)
+async_session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
-db = Database(DB_PATH)
+
+@asynccontextmanager
+async def session_scope() -> AsyncGenerator[AsyncSession, None]:
+    session: AsyncSession = async_session()
+    try:
+        yield session
+    finally:
+        await session.close()
+
 
 async def init_db():
-    """Initialize the database and create tables."""
-    await db.initialize()
-    
-    # Add super admin if not exists
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
     if SUPER_ADMIN_CHAT_ID:
-        async with db.session() as session:
-            stmt = select(AuthorizedUser).where(AuthorizedUser.chat_id == SUPER_ADMIN_CHAT_ID)
-            result = await session.execute(stmt)
-            super_admin = result.scalar()
-            
-            if not super_admin:
-                super_admin = AuthorizedUser(
-                    chat_id=SUPER_ADMIN_CHAT_ID,
-                    is_super_admin=True
-                )
-                session.add(super_admin)
-                await session.commit()
+        await add_authorized_user(SUPER_ADMIN_CHAT_ID, None, True)
+        logger.info("super_admin_seeded chat_id=%s", SUPER_ADMIN_CHAT_ID)
+
 
 async def is_user_authorized(chat_id: int) -> bool:
-    """Check if a user is authorized to use the bot."""
-    async with db.session() as session:
-        stmt = select(AuthorizedUser).where(AuthorizedUser.chat_id == chat_id)
-        result = await session.execute(stmt)
-        return result.scalar() is not None
+    async with session_scope() as session:
+        result = await session.execute(select(AuthorizedUser.chat_id).where(AuthorizedUser.chat_id == chat_id))
+        return result.scalar_one_or_none() is not None
+
 
 async def is_super_admin(chat_id: int) -> bool:
-    """Check if a user is a super admin."""
-    async with db.session() as session:
-        stmt = select(AuthorizedUser).where(
-            AuthorizedUser.chat_id == chat_id,
-            AuthorizedUser.is_super_admin == True
+    async with session_scope() as session:
+        result = await session.execute(
+            select(AuthorizedUser.chat_id).where(
+                AuthorizedUser.chat_id == chat_id,
+                AuthorizedUser.is_super_admin.is_(True),
+            )
         )
-        result = await session.execute(stmt)
-        return result.scalar() is not None
+        return result.scalar_one_or_none() is not None
 
-async def add_authorized_user(chat_id: int, username: str = None, is_super_admin: bool = False):
-    """Add a new authorized user to the database."""
-    # Validate and sanitize input
+
+async def add_authorized_user(chat_id: int, username: str | None = None, is_super_admin: bool = False):
     user_data = UserCreate(
         chat_id=chat_id,
-        username=sanitize_text(username) if username else None,
-        is_super_admin=is_super_admin
+        username=sanitize_text(username.lstrip("@")) if username else None,
+        is_super_admin=is_super_admin,
     )
-    
-    async with db.session() as session:
-        # Check if user exists
-        stmt = select(AuthorizedUser).where(AuthorizedUser.chat_id == user_data.chat_id)
-        result = await session.execute(stmt)
-        user = result.scalar()
-        
+    async with session_scope() as session:
+        user = await session.get(AuthorizedUser, user_data.chat_id)
         if user:
-            # Update existing user
             user.username = user_data.username
             user.is_super_admin = user_data.is_super_admin
         else:
-            # Create new user
-            user = AuthorizedUser(**user_data.dict())
-            session.add(user)
-        
+            session.add(AuthorizedUser(**user_data.dict()))
         await session.commit()
 
+
+async def remove_authorized_user(chat_id: int) -> bool:
+    if SUPER_ADMIN_CHAT_ID and chat_id == SUPER_ADMIN_CHAT_ID:
+        return False
+    async with session_scope() as session:
+        result = await session.execute(delete(AuthorizedUser).where(AuthorizedUser.chat_id == chat_id))
+        await session.commit()
+        return bool(result.rowcount)
+
+
+async def list_authorized_users() -> list[AuthorizedUser]:
+    async with session_scope() as session:
+        result = await session.execute(select(AuthorizedUser).order_by(AuthorizedUser.is_super_admin.desc(), AuthorizedUser.added_at.desc()))
+        return list(result.scalars().all())
+
+
+async def get_authorized_user(chat_id: int) -> AuthorizedUser | None:
+    async with session_scope() as session:
+        return await session.get(AuthorizedUser, chat_id)
+
+
 async def log_unauthorized_attempt(chat_id: int, username: str | None, command: str):
-    """Log an unauthorized attempt to use the bot."""
-    # Validate and sanitize input
     event_data = EventBase(
         chat_id=chat_id,
         username=sanitize_text(username) if username else None,
-        command=sanitize_command(command)
+        command=sanitize_command(command),
     )
-    
-    async with db.session() as session:
-        event = UnauthorizedEvent(**event_data.dict())
-        session.add(event)
+    async with session_scope() as session:
+        session.add(UnauthorizedEvent(**event_data.dict()))
         await session.commit()
 
-async def get_user_count() -> int:
-    """Get the total number of authorized users."""
-    async with db.session() as session:
-        result = await session.execute(select(AuthorizedUser))
-        return len(result.scalars().all())
 
 async def get_unauthorized_events(limit: int = 100) -> list[Event]:
-    """Get recent unauthorized access attempts."""
-    async with db.session() as session:
-        stmt = select(UnauthorizedEvent).order_by(UnauthorizedEvent.timestamp.desc()).limit(limit)
-        result = await session.execute(stmt)
-        events = result.scalars().all()
-        return [Event.from_orm(event) for event in events]
+    async with session_scope() as session:
+        result = await session.execute(select(UnauthorizedEvent).order_by(UnauthorizedEvent.timestamp.desc()).limit(limit))
+        return [Event.from_orm(event) for event in result.scalars().all()]

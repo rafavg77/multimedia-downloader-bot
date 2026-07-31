@@ -1,14 +1,34 @@
 import logging
 import asyncio
+import os
+import re
 from pathlib import Path
-from typing import Tuple
+from typing import Awaitable, Callable, Tuple
 from urllib.parse import urlparse
+from urllib.request import Request, urlopen
+
+import yt_dlp
 
 logger = logging.getLogger(__name__)
+ProgressCallback = Callable[[dict], Awaitable[None]]
 
-TRANSCODE_FOR_TELEGRAM = (str(__import__("os").getenv("TRANSCODE_FOR_TELEGRAM", "1")).lower() not in {"0", "false", "no"})
-FFMPEG_CRF = __import__("os").getenv("FFMPEG_CRF", "23")
-FFMPEG_PRESET = __import__("os").getenv("FFMPEG_PRESET", "veryfast")
+TRANSCODE_FOR_TELEGRAM = (str(os.getenv("TRANSCODE_FOR_TELEGRAM", "1")).lower() not in {"0", "false", "no"})
+FFMPEG_CRF = os.getenv("FFMPEG_CRF", "23")
+FFMPEG_PRESET = os.getenv("FFMPEG_PRESET", "veryfast")
+YTDLP_COOKIES_FILE = os.getenv("YTDLP_COOKIES_FILE", "").strip()
+YTDLP_COOKIES_FROM_BROWSER = os.getenv("YTDLP_COOKIES_FROM_BROWSER", "").strip()
+YTDLP_FORMAT = os.getenv(
+    "YTDLP_FORMAT",
+    "bv*[height<=480]+ba/b[height<=480]/best[height<=480]/best",
+).strip()
+YTDLP_DOWNLOAD_SECTIONS = os.getenv("YTDLP_DOWNLOAD_SECTIONS", "").strip()
+DEFAULT_USER_AGENT = (
+    "Mozilla/5.0 (X11; Linux x86_64; rv:138.0) Gecko/20100101 Firefox/138.0"
+)
+FLIXGAZE_PLAYER_RE = re.compile(
+    r'const\s+pathId="(?P<path>[^"]+)",\s*domainId="(?P<domain>[^"]+)",\s*videoId="(?P<video>[^"]+)"',
+    re.IGNORECASE,
+)
 
 async def transcode_to_telegram_mp4(input_path: Path) -> Tuple[bool, str, Path]:
     """Transcode to a Telegram-friendly MP4 (H.264/AAC, yuv420p).
@@ -74,11 +94,13 @@ def validate_url(url: str) -> bool:
         'x.com',
         'reddit.com',
         'redd.it',
+        'dailymotion.com',
+        'flixgaze.com',
     }
     trusted_exact_hosts = {
         'youtu.be',
     }
-    
+
     try:
         parsed = urlparse(url)
         if parsed.scheme not in ('http', 'https'):
@@ -122,70 +144,187 @@ def ensure_directories(*dirs: Path) -> bool:
         logger.error(f"Error al crear/verificar directorios: {e}")
         return False
 
-async def download_video(url: str, output_dir: Path) -> Tuple[bool, str, Path]:
+def _fetch_text(url: str, referer: str | None = None) -> str:
+    headers = {
+        "User-Agent": DEFAULT_USER_AGENT,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    }
+    if referer:
+        headers["Referer"] = referer
+
+    request = Request(url, headers=headers)
+    with urlopen(request, timeout=20) as response:
+        return response.read().decode("utf-8", errors="ignore")
+
+
+def _resolve_flixgaze_stream(url: str) -> tuple[str, dict[str, str]]:
+    page = _fetch_text(url)
+    match = FLIXGAZE_PLAYER_RE.search(page)
+    if not match:
+        raise ValueError("No se pudo extraer el reproductor de FlixGaze")
+
+    path_id = match.group("path")
+    domain_id = match.group("domain").replace("\\/", "/")
+    video_id = match.group("video")
+    stream_url = f"{domain_id}/{path_id}/{video_id}.m3u8"
+    return stream_url, {"Referer": url, "User-Agent": DEFAULT_USER_AGENT}
+
+
+def _prepare_download_target(url: str) -> tuple[str, dict[str, str]]:
+    host = (urlparse(url).netloc or "").lower()
+    if host == "www.flixgaze.com" or host.endswith(".flixgaze.com"):
+        return _resolve_flixgaze_stream(url)
+    return url, {}
+
+
+def _build_yt_dlp_command(url: str, outtmpl: str, headers: dict[str, str]) -> list[str]:
+    cmd = [
+        'yt-dlp',
+        '--no-warnings',
+        '--restrict-filenames',
+        # Prefer a Telegram/server-friendly format by default; override with YTDLP_FORMAT.
+        '-f', YTDLP_FORMAT,
+        '--merge-output-format', 'mp4',
+        '-o', outtmpl,
+        '--no-cache-dir',
+        '--no-progress',
+    ]
+
+    if YTDLP_COOKIES_FILE:
+        cmd.extend(['--cookies', YTDLP_COOKIES_FILE])
+    elif YTDLP_COOKIES_FROM_BROWSER:
+        cmd.extend(['--cookies-from-browser', YTDLP_COOKIES_FROM_BROWSER])
+
+    if YTDLP_DOWNLOAD_SECTIONS:
+        cmd.extend(['--download-sections', YTDLP_DOWNLOAD_SECTIONS])
+
+    for key, value in headers.items():
+        cmd.extend(['--add-header', f'{key}:{value}'])
+
+    cmd.append(url)
+    return cmd
+
+
+def _format_download_error(stderr_text: str) -> str:
+    compact = " ".join(stderr_text.split())[-1500:]
+
+    if 'There is no video in this post' in stderr_text:
+        return 'La publicación de Instagram no contiene video; parece ser una foto o carrusel sin video.'
+
+    if 'Requested content is not available, rate-limit reached or login required' in stderr_text:
+        message = 'Instagram pidió autenticación o bloqueó temporalmente la extracción anónima.'
+        if YTDLP_COOKIES_FILE or YTDLP_COOKIES_FROM_BROWSER:
+            return f'{message} Revisa que las cookies montadas sigan vigentes.\n\nDetalle: {compact}'
+        return (
+            message
+            + ' Configura YTDLP_COOKIES_FILE con un cookies.txt exportado del navegador '
+            + 'o YTDLP_COOKIES_FROM_BROWSER si el contenedor tiene acceso al perfil del navegador.\n\n'
+            + f'Detalle: {compact}'
+        )
+
+    if 'Unsupported URL' in stderr_text:
+        return f'yt-dlp no pudo extraer una fuente descargable para esta URL.\n\nDetalle: {compact}'
+
+    if 'Not found.' in stderr_text and '[dailymotion]' in stderr_text:
+        return f'Dailymotion respondió que el video ya no existe o no está disponible públicamente.\n\nDetalle: {compact}'
+
+    return f'Error: {compact}'
+
+
+def _parse_time_to_seconds(value: str) -> float:
+    parts = [float(part) for part in value.split(":")]
+    seconds = 0.0
+    for part in parts:
+        seconds = seconds * 60 + part
+    return seconds
+
+
+def _parse_download_sections(value: str) -> list[tuple[float | None, float | None]]:
+    ranges: list[tuple[float | None, float | None]] = []
+    for section in value.split(","):
+        section = section.strip()
+        if not section:
+            continue
+        if section.startswith("*"):
+            section = section[1:]
+        if "-" not in section:
+            continue
+        start, end = section.split("-", 1)
+        ranges.append((
+            _parse_time_to_seconds(start) if start else None,
+            _parse_time_to_seconds(end) if end else None,
+        ))
+    return ranges
+
+
+def _run_ytdlp_download(url: str, outtmpl: str, headers: dict[str, str], progress_hook) -> None:
+    ydl_opts = {
+        "outtmpl": outtmpl,
+        "restrictfilenames": True,
+        "format": YTDLP_FORMAT,
+        "merge_output_format": "mp4",
+        "cachedir": False,
+        "noprogress": True,
+        "progress_hooks": [progress_hook],
+        "http_headers": headers or {},
+        "quiet": True,
+        "no_warnings": True,
+    }
+    if YTDLP_COOKIES_FILE:
+        ydl_opts["cookiefile"] = YTDLP_COOKIES_FILE
+    elif YTDLP_COOKIES_FROM_BROWSER:
+        ydl_opts["cookiesfrombrowser"] = tuple(YTDLP_COOKIES_FROM_BROWSER.split(":"))
+    if YTDLP_DOWNLOAD_SECTIONS:
+        ranges = _parse_download_sections(YTDLP_DOWNLOAD_SECTIONS)
+        if ranges:
+            ydl_opts["download_ranges"] = yt_dlp.utils.download_range_func(None, ranges)
+
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        ydl.download([url])
+
+
+async def download_video(url: str, output_dir: Path, progress_callback: ProgressCallback | None = None) -> Tuple[bool, str, Path]:
     """
     Download video from supported platforms using yt-dlp.
     Returns: (success: bool, message: str, file_path: Path)
     """
-    # Validate URL before processing
     if not validate_url(url):
         return False, "URL no válida o dominio no soportado", Path()
-    
-    # Ensure output directory exists and is writable
+
     if not ensure_directories(output_dir):
         return False, f"Error: No se puede acceder al directorio {output_dir}", Path()
-    
+
     try:
-        # Convert to absolute path and sanitize
         safe_dir = str(output_dir.expanduser().resolve())
-        # IMPORTANT:
-        # Do NOT sanitize yt-dlp templates with slugify.
-        # If you sanitize "%(title)s" it becomes a literal like "title_s" and every file
-        # will be named "title_s.mp4".
-        # yt-dlp + --restrict-filenames already produces safe filenames.
         outtmpl = f"{safe_dir}/%(title).200B-%(id)s.%(ext)s"
-        
-        # Prepare the command with sanitized inputs
-        cmd = [
-            'yt-dlp',
-            '--no-warnings',
-            '--restrict-filenames',
-            # Some sites (e.g. Reddit) expose separate video+audio streams.
-            # This selector downloads best video+audio when available, otherwise falls back.
-            '-f', 'bv*+ba/best',
-            '--merge-output-format', 'mp4',
-            '-o', outtmpl,
-            '--no-cache-dir',
-            '--no-progress',
-            url
-        ]
-        
-        # Run the command
-        process = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
-        
-        stdout, stderr = await process.communicate()
-        
-        if process.returncode != 0:
-            return False, f"Error: {stderr.decode()}", Path()
-            
-        # Find the downloaded file safely (avoid picking metadata like .info.json)
+        effective_url, headers = _prepare_download_target(url)
+        loop = asyncio.get_running_loop()
+
+        def hook(info: dict) -> None:
+            if not progress_callback:
+                return
+            clean = {
+                "status": info.get("status"),
+                "downloaded_bytes": info.get("downloaded_bytes"),
+                "total_bytes": info.get("total_bytes") or info.get("total_bytes_estimate"),
+                "speed": info.get("speed"),
+                "eta": info.get("eta"),
+                "filename": info.get("filename"),
+            }
+            asyncio.run_coroutine_threadsafe(progress_callback(clean), loop)
+
+        await asyncio.to_thread(_run_ytdlp_download, effective_url, outtmpl, headers, hook)
+
         allowed_extensions = {'.mp4', '.mkv', '.webm', '.mov'}
-        candidate_files = [
-            p for p in output_dir.iterdir()
-            if p.is_file() and p.suffix.lower() in allowed_extensions
-        ]
+        candidate_files = [p for p in output_dir.iterdir() if p.is_file() and p.suffix.lower() in allowed_extensions]
         if not candidate_files:
             return False, "No se encontró el archivo de video descargado", Path()
 
-        # Get the most recently modified video file
         latest_file = max(candidate_files, key=lambda x: x.stat().st_mtime)
-            
         return True, "Descarga exitosa", latest_file
-        
+
+    except yt_dlp.utils.DownloadError as e:
+        return False, _format_download_error(str(e)), Path()
     except Exception as e:
         logger.error(f"Error downloading video: {e}")
         return False, f"Error: {str(e)}", Path()

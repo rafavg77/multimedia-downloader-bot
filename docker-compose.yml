@@ -1,4 +1,21 @@
 services:
+  mediabot-db:
+    image: postgres:16-alpine
+    container_name: mediabot-db
+    environment:
+      - POSTGRES_DB=${POSTGRES_DB:-mediabot}
+      - POSTGRES_USER=${POSTGRES_USER:-mediabot}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
+      - TZ=America/Monterrey
+    volumes:
+      - /docker/mediabot/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-mediabot} -d $${POSTGRES_DB:-mediabot}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
   mediabot-init:
     image: rafavg77/multimedia-downloader-bot:latest
     pull_policy: always
@@ -10,14 +27,13 @@ services:
     volumes:
       - /docker/mediabot/downloads:/data/downloads
       - /docker/mediabot/saved_videos:/data/saved_videos
-      - /docker/mediabot/db:/data/db
     restart: "no"
     command:
       - sh
       - -c
       - |
         set -e
-        mkdir -p /data/downloads /data/saved_videos /data/db
+        mkdir -p /data/downloads /data/saved_videos
         # En NFS es común que falle el chown (root_squash). No debe tumbar el init.
         chown -R "${PUID:-1000}:${PGID:-1000}" /data || true
 
@@ -28,17 +44,20 @@ services:
     depends_on:
       mediabot-init:
         condition: service_completed_successfully
+      mediabot-db:
+        condition: service_healthy
     environment:
       - BOT_TOKEN=${BOT_TOKEN:?Set BOT_TOKEN}
       - SUPER_ADMIN_CHAT_ID=${SUPER_ADMIN_CHAT_ID:-}
+      - STARTUP_NOTIFY_CHAT_ID=${STARTUP_NOTIFY_CHAT_ID:-}
+      - SEND_STARTUP_NOTIFICATION=${SEND_STARTUP_NOTIFICATION:-0}
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-mediabot}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}@mediabot-db:5432/${POSTGRES_DB:-mediabot}
       - DOWNLOAD_DIR=/data/downloads
       - SAVED_VIDEOS_DIR=/data/saved_videos
-      - DB_PATH=/data/db/users.db
       - PUID=${PUID:-1000}
       - PGID=${PGID:-1000}
       - TZ=America/Monterrey
     volumes:
       - /docker/mediabot/downloads:/data/downloads
       - /docker/mediabot/saved_videos:/data/saved_videos
-      - /docker/mediabot/db:/data/db
     restart: unless-stopped

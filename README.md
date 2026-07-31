@@ -9,6 +9,8 @@ Bot de Telegram que permite descargar videos de diferentes plataformas sociales 
   - Facebook (videos)
   - TikTok (videos)
   - YouTube (videos)
+  - Dailymotion (videos públicos)
+  - FlixGaze (fallback directo al stream HLS del reproductor)
 
 - 🎛 Opciones flexibles para cada video:
   - Descargar y enviar al chat
@@ -57,11 +59,21 @@ pip install -r requirements.txt
    TRANSCODE_FOR_TELEGRAM=1
    FFMPEG_CRF=23
    FFMPEG_PRESET=veryfast
+
+   # Opcional: cookies para sitios que ya exigen sesión
+   # Monta el archivo dentro del contenedor y apunta a esa ruta.
+   YTDLP_COOKIES_FILE=/run/secrets/yt-dlp/instagram.cookies.txt
+
+   # Alternativa avanzada: perfil de navegador accesible dentro del contenedor
+   # Ej.: firefox  /  firefox:/data/browser/firefox-profile
+   YTDLP_COOKIES_FROM_BROWSER=
      ```
 
 Notas:
 - Si tu token llegó a aparecer en logs alguna vez, regénéralo en BotFather.
 - `TRANSCODE_FOR_TELEGRAM=1` convierte a MP4 H.264/AAC antes de enviar a Telegram.
+- `.env` no se copia a la imagen Docker. Aun así, no lo subas al repo.
+- Para Instagram, varios posts/reels ya requieren cookies válidas; lo más estable en servidor suele ser montar un `cookies.txt` exportado del navegador.
 
 ## Uso
 
@@ -194,6 +206,25 @@ docker compose --env-file .env up -d
 docker compose logs -f mediabot
 ```
 
+##### Cookies opcionales sin cambiar el esquema de Compose
+
+Si un sitio necesita sesión (sobre todo Instagram), mantén el mismo `docker compose` base y agrega un override sencillo para montar el archivo de cookies:
+
+```yaml
+services:
+  mediabot:
+    environment:
+      - YTDLP_COOKIES_FILE=/run/secrets/yt-dlp/instagram.cookies.txt
+    volumes:
+      - ./secrets/instagram.cookies.txt:/run/secrets/yt-dlp/instagram.cookies.txt:ro
+```
+
+Luego levanta igual, solo sumando el override:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.cookies.yml up -d
+```
+
 ### Opción B: Docker Compose (build local)
 
 Este modo usa `docker-compose.local.yml` y construye la imagen localmente.
@@ -276,6 +307,12 @@ docker build -t rafavg77/multimedia-downloader-bot:$VERSION -t rafavg77/multimed
 docker push rafavg77/multimedia-downloader-bot:$VERSION
 docker push rafavg77/multimedia-downloader-bot:latest
 ```
+
+## 🚀 Publicar imagen en GHCR
+
+Ya quedó listo el workflow `.github/workflows/docker-ghcr.yml`.
+
+Publica automáticamente a `ghcr.io/<owner>/multimedia-downloader-bot` cuando hagas push a `main`, tags `v*`, o lo lances manualmente desde GitHub Actions.
 
 ## Contribuir
 

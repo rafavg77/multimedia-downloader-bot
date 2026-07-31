@@ -1,0 +1,12 @@
+.git
+.github
+.env
+.env.*
+*.env
+__pycache__/
+*.py[cod]
+*.db
+downloads/
+src/downloads/
+src/saved_videos/
+/docker/

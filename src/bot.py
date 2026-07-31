@@ -1,10 +1,13 @@
 import os
+import json
+import socket
 import logging
 import asyncio
 import signal
 from typing import Final
 from pathlib import Path
 from urllib.parse import urlparse, urlunparse
+from urllib.request import urlopen, Request
 from telegram.error import BadRequest
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -12,8 +15,9 @@ from telegram.ext import Application, CommandHandler, MessageHandler, ContextTyp
 
 # Import our modules
 from db_manager import (
-    init_db, is_user_authorized, is_super_admin, add_authorized_user, 
-    log_unauthorized_attempt, get_unauthorized_events
+    init_db, is_user_authorized, is_super_admin, add_authorized_user,
+    remove_authorized_user, list_authorized_users, log_unauthorized_attempt,
+    get_unauthorized_events
 )
 from downloader import download_video, ensure_directories, transcode_to_telegram_mp4
 
@@ -106,6 +110,102 @@ def _file_size_mb(path: Path) -> float:
         return 0.0
 
 TELEGRAM_MAX_UPLOAD_MB = float(os.getenv("TELEGRAM_MAX_UPLOAD_MB", "45"))
+STARTUP_NOTIFY_CHAT_ID = int(os.getenv("STARTUP_NOTIFY_CHAT_ID") or os.getenv("SUPER_ADMIN_CHAT_ID") or "0")
+SEND_STARTUP_NOTIFICATION = str(os.getenv("SEND_STARTUP_NOTIFICATION", "0")).lower() in {"1", "true", "yes"}
+
+IPINFO_URL = "https://ipinfo.io/json"
+NETWORK_INFO_CALLBACKS = {"show_private_ip", "show_public_ip"}
+
+
+def _startup_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("🏠 IP privada", callback_data="show_private_ip"),
+                InlineKeyboardButton("🌐 IP pública", callback_data="show_public_ip"),
+            ]
+        ]
+    )
+
+
+def _get_private_ip_sync() -> str:
+    """Best-effort private/source IP used for outbound LAN traffic."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        # No packets are sent; connect selects the local source address.
+        sock.connect(("8.8.8.8", 80))
+        return sock.getsockname()[0]
+    finally:
+        sock.close()
+
+
+async def get_private_ip() -> str:
+    try:
+        return await asyncio.to_thread(_get_private_ip_sync)
+    except Exception as exc:
+        logger.warning("private_ip_lookup_failed error=%s", exc)
+        return "No disponible"
+
+
+def _get_public_ipinfo_sync() -> dict:
+    request = Request(IPINFO_URL, headers={"User-Agent": "multimedia-downloader-bot/1.0"})
+    with urlopen(request, timeout=8) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+async def get_public_ipinfo() -> dict:
+    try:
+        return await asyncio.to_thread(_get_public_ipinfo_sync)
+    except Exception as exc:
+        logger.warning("public_ip_lookup_failed error=%s", exc)
+        return {"error": str(exc)}
+
+
+def format_private_ip_message(private_ip: str) -> str:
+    return f"🏠 IP privada actual del bot: `{private_ip}`"
+
+
+def format_public_ip_message(info: dict) -> str:
+    if info.get("error"):
+        return f"🌐 IP pública: No disponible ({info['error']})"
+
+    lines = [f"🌐 IP pública actual del bot: `{info.get('ip', 'No disponible')}`"]
+    details = []
+    for label, key in (("Ciudad", "city"), ("Región", "region"), ("País", "country"), ("Org", "org")):
+        value = info.get(key)
+        if value:
+            details.append(f"{label}: {value}")
+    if details:
+        lines.append("\n" + "\n".join(details))
+    return "\n".join(lines)
+
+
+async def build_network_status_message() -> str:
+    private_ip, public_info = await asyncio.gather(get_private_ip(), get_public_ipinfo())
+    return (
+        "🤖 Bot iniciado\n\n"
+        f"{format_private_ip_message(private_ip)}\n\n"
+        f"{format_public_ip_message(public_info)}"
+    )
+
+
+async def send_startup_notification(application: Application) -> None:
+    if not SEND_STARTUP_NOTIFICATION:
+        logger.info("Startup notification skipped: SEND_STARTUP_NOTIFICATION disabled")
+        return
+    if not STARTUP_NOTIFY_CHAT_ID:
+        logger.info("Startup notification skipped: STARTUP_NOTIFY_CHAT_ID/SUPER_ADMIN_CHAT_ID not configured")
+        return
+
+    try:
+        await application.bot.send_message(
+            chat_id=STARTUP_NOTIFY_CHAT_ID,
+            text=await build_network_status_message(),
+            reply_markup=_main_menu(False),
+        )
+        logger.info("startup_notification_sent chat_id=%s", STARTUP_NOTIFY_CHAT_ID)
+    except Exception as exc:
+        logger.warning("startup_notification_failed chat_id=%s error=%s", STARTUP_NOTIFY_CHAT_ID, exc)
 
 # Ensure directories exist and have correct permissions
 if not ensure_directories(DOWNLOAD_DIR, SAVED_VIDEOS_DIR):
@@ -132,6 +232,43 @@ async def handle_unauthorized_user(update: Update, command: str = None):
     await update.message.reply_text("keep trying script kiddie 😎")
     logger.warning(f"Unauthorized access attempt from chat_id: {chat_id}")
 
+def _main_menu(is_admin: bool) -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton("🏠 IP privada", callback_data="show_private_ip"), InlineKeyboardButton("🌐 IP pública", callback_data="show_public_ip")],
+    ]
+    if is_admin:
+        rows.append([InlineKeyboardButton("👥 Administración de usuarios", callback_data="admin_users_menu")])
+    return InlineKeyboardMarkup(rows)
+
+
+def _admin_users_menu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("➕ Agregar/actualizar usuario", callback_data="admin_add_user")],
+        [InlineKeyboardButton("📋 Ver usuarios", callback_data="admin_list_users")],
+        [InlineKeyboardButton("🚫 Ver intentos no autorizados", callback_data="admin_events")],
+        [InlineKeyboardButton("⬅️ Volver", callback_data="main_menu")],
+    ])
+
+
+def _role_label(is_admin: bool) -> str:
+    return "admin" if is_admin else "usuario"
+
+
+async def _show_main_menu(chat_id: int, bot, edit_message=None) -> None:
+    admin = await is_super_admin(chat_id)
+    text = (
+        "🎥 *Multimedia Downloader Bot*\n\n"
+        "Envíame un enlace de Instagram, Facebook, TikTok, YouTube, Dailymotion o FlixGaze "
+        "y te preguntaré qué quieres hacer con él."
+    )
+    if admin:
+        text += "\n\n👑 Tienes habilitado el menú de administración de usuarios."
+    if edit_message:
+        await edit_message.edit_text(text, reply_markup=_main_menu(admin), parse_mode="Markdown")
+    else:
+        await bot.send_message(chat_id=chat_id, text=text, reply_markup=_main_menu(admin), parse_mode="Markdown")
+
+
 async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Admin command to add authorized users. Only super admins can use this."""
     if not await is_super_admin(update.effective_chat.id):
@@ -139,28 +276,25 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
     
     if not context.args:
-        await update.message.reply_text(
-            "Uso: /admin <chat_id> [username] [is_super_admin]\n"
-            "is_super_admin puede ser 'true' o 'false'"
-        )
+        await update.message.reply_text("👥 Administración de usuarios", reply_markup=_admin_users_menu())
         return
-    
+
+    if context.args[0].lower() == "remove":
+        try:
+            removed = await remove_authorized_user(int(context.args[1]))
+            await update.message.reply_text("✅ Usuario removido." if removed else "⚠️ No se removió el usuario (no existe o es admin semilla).")
+        except (IndexError, ValueError):
+            await update.message.reply_text("Uso: /admin remove <telegram_id>")
+        return
+
     try:
         chat_id = int(context.args[0])
         username = context.args[1] if len(context.args) > 1 else None
-        is_super = (
-            context.args[2].lower() == 'true'
-            if len(context.args) > 2
-            else False
-        )
-        
+        is_super = context.args[2].lower() in {"true", "admin", "1", "yes"} if len(context.args) > 2 else False
         await add_authorized_user(chat_id, username, is_super)
-        role = "super administrador" if is_super else "usuario autorizado"
-        await update.message.reply_text(
-            f"Usuario {chat_id} agregado exitosamente como {role}."
-        )
+        await update.message.reply_text(f"✅ Usuario {chat_id} guardado como {_role_label(is_super)}.")
     except ValueError:
-        await update.message.reply_text("Error: El chat_id debe ser un número.")
+        await update.message.reply_text("Uso: /admin <telegram_id> [username] [user|admin]\nEjemplo: /admin 123456789 rafa admin")
 
 async def events_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Command to view unauthorized access attempts. Only super admins can use this."""
@@ -190,10 +324,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await handle_unauthorized_user(update, "/start")
         return
 
-    await update.message.reply_text(
-        "¡Hola! Envíame un enlace de video de Instagram, Facebook, TikTok o YouTube "
-        "y te preguntaré qué quieres hacer con él. 🎥"
-    )
+    await _show_main_menu(update.effective_chat.id, context.bot)
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Send a message when the command /help is issued."""
@@ -210,7 +341,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "- Instagram (posts y reels)\n"
         "- Facebook (videos)\n"
         "- TikTok (videos)\n"
-        "- YouTube (videos)"
+        "- YouTube (videos)\n"
+        "- Dailymotion (videos públicos)\n"
+        "- FlixGaze (stream HLS del reproductor)"
     )
 
 async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -249,6 +382,79 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         reply_markup=reply_markup
     )
 
+async def _send_users_list(query) -> None:
+    users = await list_authorized_users()
+    if not users:
+        await query.edit_message_text("No hay usuarios autorizados.", reply_markup=_admin_users_menu())
+        return
+    lines = ["👥 *Usuarios autorizados*", ""]
+    for user in users:
+        username = f"@{user.username}" if user.username else "sin username"
+        lines.append(f"• `{user.chat_id}` — {username} — {_role_label(user.is_super_admin)}")
+    await query.edit_message_text("\n".join(lines), reply_markup=_admin_users_menu(), parse_mode="Markdown")
+
+
+async def _send_events_list(query) -> None:
+    events = await get_unauthorized_events(10)
+    if not events:
+        await query.edit_message_text("No hay intentos no autorizados registrados.", reply_markup=_admin_users_menu())
+        return
+    lines = ["🚫 *Últimos intentos no autorizados*", ""]
+    for event in events:
+        username = f"@{event.username}" if event.username else "sin username"
+        lines.append(f"• `{event.chat_id}` — {username} — `{event.command}`")
+    await query.edit_message_text("\n".join(lines), reply_markup=_admin_users_menu(), parse_mode="Markdown")
+
+
+async def _handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    query = update.callback_query
+    chat_id = query.message.chat_id
+    if query.data == "main_menu":
+        await _show_main_menu(chat_id, context.bot, edit_message=query.message)
+        return True
+    if not query.data.startswith("admin_"):
+        return False
+    if not await is_super_admin(chat_id):
+        await query.answer("Solo admins pueden usar este menú.", show_alert=True)
+        return True
+    if query.data == "admin_users_menu":
+        await query.edit_message_text("👥 *Administración de usuarios*", reply_markup=_admin_users_menu(), parse_mode="Markdown")
+    elif query.data == "admin_add_user":
+        await query.edit_message_text(
+            "➕ *Agregar/actualizar usuario*\n\n"
+            "Envíame en esta conversación:\n"
+            "`/admin <telegram_id> <username> <user|admin>`\n\n"
+            "Ejemplo:\n"
+            "`/admin 123456789 rafa user`\n\n"
+            "Para borrar:\n"
+            "`/admin remove 123456789`",
+            reply_markup=_admin_users_menu(),
+            parse_mode="Markdown",
+        )
+    elif query.data == "admin_list_users":
+        await _send_users_list(query)
+    elif query.data == "admin_events":
+        await _send_events_list(query)
+    return True
+
+
+def _format_progress(info: dict) -> str:
+    total = info.get("total_bytes")
+    downloaded = info.get("downloaded_bytes") or 0
+    eta = info.get("eta")
+    speed = info.get("speed")
+    if total:
+        pct = min(100.0, downloaded * 100 / total)
+        text = f"⬇️ Descargando video... {pct:.1f}%"
+    else:
+        text = f"⬇️ Descargando video... {downloaded / (1024 * 1024):.1f} MB"
+    if eta:
+        text += f"\nETA: {eta}s"
+    if speed:
+        text += f" · {speed / (1024 * 1024):.1f} MB/s"
+    return text
+
+
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle button callbacks."""
     if not await is_user_authorized(update.callback_query.message.chat_id):
@@ -258,6 +464,21 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     query = update.callback_query
     await query.answer()
+
+    if await _handle_admin_callback(update, context):
+        return
+
+    if query.data in NETWORK_INFO_CALLBACKS:
+        chat = update.effective_chat
+        if chat is None:
+            return
+        chat_id = chat.id
+        if query.data == "show_private_ip":
+            text = format_private_ip_message(await get_private_ip())
+        else:
+            text = format_public_ip_message(await get_public_ipinfo())
+        await context.bot.send_message(chat_id=chat_id, text=text)
+        return
     
     url = context.user_data.get('current_url')
     if not url:
@@ -281,8 +502,27 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         # Choose directory based on action
         output_dir = SAVED_VIDEOS_DIR if query.data in ["save", "save_and_send"] else DOWNLOAD_DIR
         
-        await message.edit_text("⬇️ Descargando video...")
-        success, status_msg, video_path = await download_video(url, output_dir)
+        await message.edit_text("⬇️ Descargando video... 0%")
+        last_progress = {"percent": -1}
+
+        async def progress_callback(info: dict) -> None:
+            if info.get("status") not in {"downloading", "finished"}:
+                return
+            total = info.get("total_bytes")
+            downloaded = info.get("downloaded_bytes") or 0
+            percent = int(downloaded * 100 / total) if total else 0
+            if info.get("status") == "finished":
+                percent = 100
+            # Avoid Telegram rate limits: update every 5% plus completion.
+            if percent < 100 and percent - last_progress["percent"] < 5:
+                return
+            last_progress["percent"] = percent
+            try:
+                await message.edit_text(_format_progress(info))
+            except Exception:
+                pass
+
+        success, status_msg, video_path = await download_video(url, output_dir, progress_callback=progress_callback)
         
         if not success:
             raise Exception(status_msg)
@@ -505,6 +745,7 @@ async def main() -> None:
         
         # Start polling in background
         application.create_task(application.updater.start_polling(drop_pending_updates=True))
+        await send_startup_notification(application)
         
         # Wait for stop signal
         try:
