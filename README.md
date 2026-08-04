@@ -52,7 +52,7 @@ pip install -r requirements.txt
    # Opcionales (recomendado para producción)
    LOG_LEVEL=INFO
    # Límite “seguro” para evitar 413 al enviar a Telegram
-   TELEGRAM_MAX_UPLOAD_MB=45
+   TELEGRAM_MAX_UPLOAD_MB=49
 
    # Transcodificación para compatibilidad con Telegram
    # (evita el caso “primer frame estático + audio” con algunos codecs)

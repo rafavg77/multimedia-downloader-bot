@@ -114,7 +114,7 @@ async def _telegram_video_kwargs(path: Path) -> dict[str, int]:
     metadata = await probe_video_metadata(path)
     return {key: value for key, value in metadata.items() if key in {"width", "height", "duration"} and value}
 
-TELEGRAM_MAX_UPLOAD_MB = float(os.getenv("TELEGRAM_MAX_UPLOAD_MB", "45"))
+TELEGRAM_MAX_UPLOAD_MB = float(os.getenv("TELEGRAM_MAX_UPLOAD_MB", "49"))
 STARTUP_NOTIFY_CHAT_ID = int(os.getenv("STARTUP_NOTIFY_CHAT_ID") or os.getenv("SUPER_ADMIN_CHAT_ID") or "0")
 SEND_STARTUP_NOTIFICATION = str(os.getenv("SEND_STARTUP_NOTIFICATION", "0")).lower() in {"1", "true", "yes"}
 
