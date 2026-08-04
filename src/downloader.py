@@ -23,6 +23,15 @@ YTDLP_FORMAT = os.getenv(
     "bv*[height<=480]+ba/b[height<=480]/best[height<=480]/best",
 ).strip()
 YTDLP_DOWNLOAD_SECTIONS = os.getenv("YTDLP_DOWNLOAD_SECTIONS", "").strip()
+YTDLP_TIKTOK_APP_INFO = os.getenv(
+    "YTDLP_TIKTOK_APP_INFO",
+    "musical_ly/35.1.3/2023501030/1233",
+).strip()
+YTDLP_TIKTOK_API_HOSTNAME = os.getenv(
+    "YTDLP_TIKTOK_API_HOSTNAME",
+    "api16-normal-c-alisg.tiktokv.com",
+).strip()
+YTDLP_TIKTOK_RETRIES = int(os.getenv("YTDLP_TIKTOK_RETRIES", "10"))
 DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64; rv:138.0) Gecko/20100101 Firefox/138.0"
 )
@@ -322,6 +331,17 @@ def _run_ytdlp_download(url: str, outtmpl: str, headers: dict[str, str], progres
         if ranges:
             ydl_opts["download_ranges"] = yt_dlp.utils.download_range_func(None, ranges)
 
+    parsed_host = (urlparse(url).netloc or "").lower()
+    if parsed_host == "vt.tiktok.com" or parsed_host.endswith(".tiktok.com"):
+        tiktok_args: dict[str, list[str]] = {}
+        if YTDLP_TIKTOK_APP_INFO:
+            # Force yt-dlp to try TikTok's mobile API before falling back to brittle webpage data.
+            tiktok_args["app_info"] = [YTDLP_TIKTOK_APP_INFO]
+        if YTDLP_TIKTOK_API_HOSTNAME:
+            tiktok_args["api_hostname"] = [YTDLP_TIKTOK_API_HOSTNAME]
+        if tiktok_args:
+            ydl_opts["extractor_args"] = {"tiktok": tiktok_args}
+
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         ydl.download([url])
 
@@ -357,7 +377,8 @@ async def download_video(url: str, output_dir: Path, progress_callback: Progress
             asyncio.run_coroutine_threadsafe(progress_callback(clean), loop)
 
         last_download_error: DownloadError | None = None
-        for attempt in range(1, 4):
+        max_attempts = max(1, YTDLP_TIKTOK_RETRIES if "tiktok.com" in (urlparse(effective_url).netloc or "").lower() else 3)
+        for attempt in range(1, max_attempts + 1):
             try:
                 await asyncio.to_thread(_run_ytdlp_download, effective_url, outtmpl, headers, hook)
                 last_download_error = None
@@ -369,11 +390,12 @@ async def download_video(url: str, output_dir: Path, progress_callback: Progress
                     "[TikTok]" in error_text
                     and "Unable to extract universal data for rehydration" in error_text
                 )
-                if not transient_tiktok_error or attempt >= 3:
+                if not transient_tiktok_error or attempt >= max_attempts:
                     raise
                 logger.warning(
-                    "TikTok extraction failed with universal-data error; retrying attempt %s/3",
+                    "TikTok extraction failed with universal-data error; retrying attempt %s/%s",
                     attempt + 1,
+                    max_attempts,
                 )
                 await asyncio.sleep(2 * attempt)
 
