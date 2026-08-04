@@ -8,6 +8,7 @@ from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 import yt_dlp
+from yt_dlp.utils import DownloadError
 
 logger = logging.getLogger(__name__)
 ProgressCallback = Callable[[dict], Awaitable[None]]
@@ -355,7 +356,29 @@ async def download_video(url: str, output_dir: Path, progress_callback: Progress
             }
             asyncio.run_coroutine_threadsafe(progress_callback(clean), loop)
 
-        await asyncio.to_thread(_run_ytdlp_download, effective_url, outtmpl, headers, hook)
+        last_download_error: DownloadError | None = None
+        for attempt in range(1, 4):
+            try:
+                await asyncio.to_thread(_run_ytdlp_download, effective_url, outtmpl, headers, hook)
+                last_download_error = None
+                break
+            except DownloadError as e:
+                last_download_error = e
+                error_text = str(e)
+                transient_tiktok_error = (
+                    "[TikTok]" in error_text
+                    and "Unable to extract universal data for rehydration" in error_text
+                )
+                if not transient_tiktok_error or attempt >= 3:
+                    raise
+                logger.warning(
+                    "TikTok extraction failed with universal-data error; retrying attempt %s/3",
+                    attempt + 1,
+                )
+                await asyncio.sleep(2 * attempt)
+
+        if last_download_error is not None:
+            raise last_download_error
 
         allowed_extensions = {'.mp4', '.mkv', '.webm', '.mov'}
         candidate_files = [p for p in output_dir.iterdir() if p.is_file() and p.suffix.lower() in allowed_extensions]
@@ -365,7 +388,7 @@ async def download_video(url: str, output_dir: Path, progress_callback: Progress
         latest_file = max(candidate_files, key=lambda x: x.stat().st_mtime)
         return True, "Descarga exitosa", latest_file
 
-    except yt_dlp.utils.DownloadError as e:
+    except DownloadError as e:
         return False, _format_download_error(str(e)), Path()
     except Exception as e:
         logger.error(f"Error downloading video: {e}")
