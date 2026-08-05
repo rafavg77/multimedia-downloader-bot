@@ -51,6 +51,8 @@ pip install -r requirements.txt
 
    # Opcionales (recomendado para producción)
    LOG_LEVEL=INFO
+   # Actualiza automáticamente los comandos / disponibles en Telegram al arrancar
+   AUTO_SET_BOT_COMMANDS=1
    # Límite “seguro” para evitar 413 al enviar a Telegram
    TELEGRAM_MAX_UPLOAD_MB=49
 

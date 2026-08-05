@@ -10,7 +10,7 @@ from urllib.parse import urlparse, urlunparse
 from urllib.request import urlopen, Request
 from telegram.error import BadRequest
 from dotenv import load_dotenv
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import BotCommand, Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, CallbackQueryHandler, filters
 
 # Import our modules
@@ -117,6 +117,7 @@ async def _telegram_video_kwargs(path: Path) -> dict[str, int]:
 TELEGRAM_MAX_UPLOAD_MB = float(os.getenv("TELEGRAM_MAX_UPLOAD_MB", "49"))
 STARTUP_NOTIFY_CHAT_ID = int(os.getenv("STARTUP_NOTIFY_CHAT_ID") or os.getenv("SUPER_ADMIN_CHAT_ID") or "0")
 SEND_STARTUP_NOTIFICATION = str(os.getenv("SEND_STARTUP_NOTIFICATION", "0")).lower() in {"1", "true", "yes"}
+AUTO_SET_BOT_COMMANDS = str(os.getenv("AUTO_SET_BOT_COMMANDS", "1")).lower() in {"1", "true", "yes"}
 
 IPINFO_URL = "https://ipinfo.io/json"
 NETWORK_INFO_CALLBACKS = {"show_private_ip", "show_public_ip"}
@@ -125,6 +126,13 @@ ADMIN_ADD_DRAFT_KEY = "admin_add_user_draft"
 ADMIN_ADD_STATE_NAME = "name"
 ADMIN_ADD_STATE_CHAT_ID = "chat_id"
 ADMIN_ADD_STATE_ROLE = "role"
+
+BOT_COMMANDS = [
+    BotCommand("start", "Abrir el menú principal"),
+    BotCommand("help", "Ver ayuda y plataformas soportadas"),
+    BotCommand("admin", "Administrar usuarios autorizados"),
+    BotCommand("events", "Ver últimos intentos no autorizados"),
+]
 
 
 def _startup_keyboard() -> InlineKeyboardMarkup:
@@ -216,6 +224,19 @@ async def send_startup_notification(application: Application) -> None:
         logger.info("startup_notification_sent chat_id=%s", STARTUP_NOTIFY_CHAT_ID)
     except Exception as exc:
         logger.warning("startup_notification_failed chat_id=%s error=%s", STARTUP_NOTIFY_CHAT_ID, exc)
+
+
+async def sync_bot_commands(application: Application) -> None:
+    """Publish the slash-command menu in Telegram on every deployment/startup."""
+    if not AUTO_SET_BOT_COMMANDS:
+        logger.info("Bot command sync skipped: AUTO_SET_BOT_COMMANDS disabled")
+        return
+
+    try:
+        await application.bot.set_my_commands(BOT_COMMANDS)
+        logger.info("bot_commands_synced commands=%s", ",".join(command.command for command in BOT_COMMANDS))
+    except Exception as exc:
+        logger.warning("bot_commands_sync_failed error=%s", exc)
 
 # Ensure directories exist and have correct permissions
 if not ensure_directories(DOWNLOAD_DIR, SAVED_VIDEOS_DIR):
@@ -840,6 +861,7 @@ async def main() -> None:
         # Start the bot
         logger.info("Starting bot...")
         await application.initialize()
+        await sync_bot_commands(application)
         await application.start()
         
         stop_signal = asyncio.Future()
