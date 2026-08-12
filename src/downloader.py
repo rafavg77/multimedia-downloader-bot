@@ -32,6 +32,7 @@ YTDLP_TIKTOK_API_HOSTNAME = os.getenv(
     "api16-normal-c-alisg.tiktokv.com",
 ).strip()
 YTDLP_TIKTOK_RETRIES = int(os.getenv("YTDLP_TIKTOK_RETRIES", "10"))
+YTDLP_YOUTUBE_PLAYER_CLIENT = os.getenv("YTDLP_YOUTUBE_PLAYER_CLIENT", "android").strip()
 DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64; rv:138.0) Gecko/20100101 Firefox/138.0"
 )
@@ -250,6 +251,10 @@ def _build_yt_dlp_command(url: str, outtmpl: str, headers: dict[str, str]) -> li
     if YTDLP_DOWNLOAD_SECTIONS:
         cmd.extend(['--download-sections', YTDLP_DOWNLOAD_SECTIONS])
 
+    host = (urlparse(url).netloc or "").lower()
+    if YTDLP_YOUTUBE_PLAYER_CLIENT and (host == "youtu.be" or host == "youtube.com" or host.endswith(".youtube.com")):
+        cmd.extend(['--extractor-args', f'youtube:player_client={YTDLP_YOUTUBE_PLAYER_CLIENT}'])
+
     for key, value in headers.items():
         cmd.extend(['--add-header', f'{key}:{value}'])
 
@@ -332,6 +337,14 @@ def _run_ytdlp_download(url: str, outtmpl: str, headers: dict[str, str], progres
             ydl_opts["download_ranges"] = yt_dlp.utils.download_range_func(None, ranges)
 
     parsed_host = (urlparse(url).netloc or "").lower()
+    extractor_args: dict[str, dict[str, list[str]]] = {}
+    if YTDLP_YOUTUBE_PLAYER_CLIENT and (
+        parsed_host == "youtu.be"
+        or parsed_host == "youtube.com"
+        or parsed_host.endswith(".youtube.com")
+    ):
+        extractor_args["youtube"] = {"player_client": [YTDLP_YOUTUBE_PLAYER_CLIENT]}
+
     if parsed_host == "vt.tiktok.com" or parsed_host.endswith(".tiktok.com"):
         tiktok_args: dict[str, list[str]] = {}
         if YTDLP_TIKTOK_APP_INFO:
@@ -340,7 +353,10 @@ def _run_ytdlp_download(url: str, outtmpl: str, headers: dict[str, str], progres
         if YTDLP_TIKTOK_API_HOSTNAME:
             tiktok_args["api_hostname"] = [YTDLP_TIKTOK_API_HOSTNAME]
         if tiktok_args:
-            ydl_opts["extractor_args"] = {"tiktok": tiktok_args}
+            extractor_args["tiktok"] = tiktok_args
+
+    if extractor_args:
+        ydl_opts["extractor_args"] = extractor_args
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         ydl.download([url])
