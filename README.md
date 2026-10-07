@@ -79,9 +79,20 @@ Notas:
 
 ## Uso
 
-### Opción A: Docker Compose (Docker Hub / producción)
+### Opción A: Despliegue Automatizado (GitHub Actions + GHCR + 1Password)
 
-Este modo usa `docker-compose.yml` y descarga la imagen desde Docker Hub. También incluye un contenedor `mediabot-init` que crea y ajusta permisos de los volúmenes automáticamente (no necesitas crear carpetas manualmente).
+El despliegue está totalmente automatizado mediante GitHub Actions:
+1. Al hacer push a `main`, el workflow compila la imagen Docker y la publica en GitHub Container Registry (`ghcr.io/rafavg77/multimedia-downloader-bot`).
+2. El runner auto-hospedado en el servidor `composes` sincroniza `docker-compose.yml` y `.env.tpl`.
+3. Inyecta los secretos y rutas NFS desde 1Password mediante `op inject`.
+4. Descarga la nueva imagen de GHCR y levanta los contenedores con volúmenes NFS directos hacia Kyubi.
+
+```bash
+# Inyección manual opcional con 1Password CLI:
+op inject -i .env.tpl -o .env --force
+docker compose up -d
+docker compose logs -f mediabot
+```
 
 ```bash
 docker compose up -d
@@ -198,6 +209,10 @@ export NFS_MOUNT_BASE=/mnt/raspi_videos
 docker compose -f docker-compose.yml -f docker-compose.nfs.bind.yml up -d
 docker compose logs -f mediabot
 ```
+
+Nota: con bind-mount, asegúrate de que existan estas carpetas en el host (dentro del NFS montado), o Docker fallará al arrancar:
+- `${NFS_MOUNT_BASE}/mediabot/downloads`
+- `${NFS_MOUNT_BASE}/mediabot/saved_videos`
 
 #### Producción (con archivo `.env`)
 

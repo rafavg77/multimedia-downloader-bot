@@ -1,0 +1,102 @@
+name: Build and Deploy
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ghcr.io/${{ github.repository }}
+
+jobs:
+  build-and-push:
+    name: Build & Push Docker Image
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.IMAGE_NAME }}:latest
+            ${{ env.IMAGE_NAME }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    name: Deploy to Compose Server
+    needs: build-and-push
+    runs-on: [self-hosted, linux, x64, multimedia-downloader-bot]
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Sync compose and template configuration
+        env:
+          TARGET_DIR: /opt/stacks/multimedia-downloader-bot
+        run: |
+          mkdir -p "$TARGET_DIR"
+          cp docker-compose.yml "$TARGET_DIR/docker-compose.yml"
+          cp .env.tpl "$TARGET_DIR/.env.tpl"
+
+      - name: Inject production secrets from 1Password
+        env:
+          OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+          TARGET_DIR: /opt/stacks/multimedia-downloader-bot
+        run: |
+          set -e
+          echo "Injecting secrets from 1Password into production .env..."
+          mkdir -p "$TARGET_DIR"
+          if [ -z "$OP_SERVICE_ACCOUNT_TOKEN" ] && [ -f /etc/environment ]; then
+            export $(grep '^OP_SERVICE_ACCOUNT_TOKEN=' /etc/environment | xargs)
+          fi
+          op inject -i "$TARGET_DIR/.env.tpl" -o "$TARGET_DIR/.env" --force
+          chmod 600 "$TARGET_DIR/.env"
+          echo "Production .env successfully generated from 1Password."
+
+      - name: Pull and Deploy Stack
+        env:
+          TARGET_DIR: /opt/stacks/multimedia-downloader-bot
+        run: |
+          set -e
+          cd "$TARGET_DIR"
+          docker compose pull
+          docker compose up -d --remove-orphans
+
+      - name: Verify running containers
+        env:
+          TARGET_DIR: /opt/stacks/multimedia-downloader-bot
+        run: |
+          set -e
+          cd "$TARGET_DIR"
+          echo "Waiting 5 seconds for container startup..."
+          sleep 5
+          docker compose ps

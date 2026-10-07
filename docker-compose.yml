@@ -6,9 +6,9 @@ services:
       - POSTGRES_DB=${POSTGRES_DB:-mediabot}
       - POSTGRES_USER=${POSTGRES_USER:-mediabot}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
-      - TZ=America/Monterrey
+      - TZ=${TZ:-America/Monterrey}
     volumes:
-      - /docker/mediabot/postgres:/var/lib/postgresql/data
+      - ./data/postgres:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-mediabot} -d $${POSTGRES_DB:-mediabot}"]
       interval: 10s
@@ -17,16 +17,16 @@ services:
     restart: unless-stopped
 
   mediabot-init:
-    image: rafavg77/multimedia-downloader-bot:latest
-    pull_policy: never
+    image: ghcr.io/rafavg77/multimedia-downloader-bot:latest
+    pull_policy: always
     container_name: mediabot-init
     environment:
       - PUID=${PUID:-1000}
       - PGID=${PGID:-1000}
     user: "0:0"
     volumes:
-      - /docker/mediabot/downloads:/data/downloads
-      - /docker/mediabot/saved_videos:/data/saved_videos
+      - mediabot_downloads:/data/downloads
+      - mediabot_saved_videos:/data/saved_videos
     restart: "no"
     command:
       - sh
@@ -38,8 +38,8 @@ services:
         chown -R "${PUID:-1000}:${PGID:-1000}" /data || true
 
   mediabot:
-    image: rafavg77/multimedia-downloader-bot:latest
-    pull_policy: never
+    image: ghcr.io/rafavg77/multimedia-downloader-bot:latest
+    pull_policy: always
     container_name: mediabot
     depends_on:
       mediabot-init:
@@ -56,8 +56,22 @@ services:
       - SAVED_VIDEOS_DIR=/data/saved_videos
       - PUID=${PUID:-1000}
       - PGID=${PGID:-1000}
-      - TZ=America/Monterrey
+      - TZ=${TZ:-America/Monterrey}
     volumes:
-      - /docker/mediabot/downloads:/data/downloads
-      - /docker/mediabot/saved_videos:/data/saved_videos
+      - mediabot_downloads:/data/downloads
+      - mediabot_saved_videos:/data/saved_videos
     restart: unless-stopped
+
+volumes:
+  mediabot_downloads:
+    driver: local
+    driver_opts:
+      type: "nfs"
+      o: "addr=${NFS_SERVER:?Set NFS_SERVER},rw,nfsvers=${NFS_VERS:-4}"
+      device: ":${NFS_EXPORT_DOWNLOADS:?Set NFS_EXPORT_DOWNLOADS}"
+  mediabot_saved_videos:
+    driver: local
+    driver_opts:
+      type: "nfs"
+      o: "addr=${NFS_SERVER:?Set NFS_SERVER},rw,nfsvers=${NFS_VERS:-4}"
+      device: ":${NFS_EXPORT_SAVED_VIDEOS:?Set NFS_EXPORT_SAVED_VIDEOS}"
