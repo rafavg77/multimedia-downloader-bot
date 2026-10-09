@@ -34,4 +34,6 @@ COPY --chown=www-data:www-data src/ ./src/
 # Cambiar al usuario www-data
 USER www-data
 
+EXPOSE 9099
+
 CMD ["python", "src/bot.py"]

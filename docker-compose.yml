@@ -46,8 +46,11 @@ services:
         condition: service_completed_successfully
       mediabot-db:
         condition: service_healthy
+    ports:
+      - "${METRICS_PORT:-9099}:9099"
     environment:
       - BOT_TOKEN=${BOT_TOKEN:?Set BOT_TOKEN}
+      - METRICS_PORT=${METRICS_PORT:-9099}
       - SUPER_ADMIN_CHAT_ID=${SUPER_ADMIN_CHAT_ID:-}
       - STARTUP_NOTIFY_CHAT_ID=${STARTUP_NOTIFY_CHAT_ID:-}
       - SEND_STARTUP_NOTIFICATION=${SEND_STARTUP_NOTIFICATION:-0}

@@ -30,3 +30,7 @@ TZ=op://HomeLab/MultimediaBot/TZ
 # Rutas internas en el contenedor (no modificar)
 DOWNLOAD_DIR=/data/downloads
 SAVED_VIDEOS_DIR=/data/saved_videos
+
+# Observabilidad & Telemetría Prometheus
+METRICS_PORT=9099
+

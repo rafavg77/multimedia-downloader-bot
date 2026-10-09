@@ -4,6 +4,7 @@ import socket
 import logging
 import asyncio
 import signal
+import time
 from typing import Final
 from pathlib import Path
 from urllib.parse import urlparse, urlunparse
@@ -20,6 +21,12 @@ from db_manager import (
     get_unauthorized_events
 )
 from downloader import download_video, ensure_directories, probe_video_metadata, transcode_to_telegram_mp4
+from metrics import (
+    start_metrics_server, update_uptime, detect_platform,
+    record_request, record_unauthorized_attempt, record_download_start,
+    record_download_result, record_transcode_start, record_transcode_result,
+    record_telegram_upload, set_authorized_users_count,
+)
 
 # Load environment variables
 load_dotenv()
@@ -251,14 +258,18 @@ async def handle_unauthorized_user(update: Update, command: str = None):
     """Handle unauthorized access attempts."""
     chat_id = update.effective_chat.id
     username = update.effective_user.username if update.effective_user else None
-    
+    cmd_text = command or (update.message.text if update.message else "unknown")
+
+    # Track metrics
+    record_unauthorized_attempt(cmd_text)
+
     # Log the unauthorized attempt
     await log_unauthorized_attempt(
         chat_id=chat_id,
         username=username,
-        command=command or update.message.text if update.message else "unknown"
+        command=cmd_text
     )
-    
+
     # Send the unauthorized message
     await update.message.reply_text("keep trying script kiddie 😎")
     logger.warning(f"Unauthorized access attempt from chat_id: {chat_id}")
@@ -322,7 +333,9 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if not await is_super_admin(update.effective_chat.id):
         await handle_unauthorized_user(update, "/admin")
         return
-    
+
+    record_request("command_admin", "authorized")
+
     if not context.args:
         await update.message.reply_text("👥 Administración de usuarios", reply_markup=_admin_users_menu())
         return
@@ -330,6 +343,9 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if context.args[0].lower() == "remove":
         try:
             removed = await remove_authorized_user(int(context.args[1]))
+            if removed:
+                users = await list_authorized_users()
+                set_authorized_users_count(len(users))
             await update.message.reply_text("✅ Usuario removido." if removed else "⚠️ No se removió el usuario (no existe o es admin semilla).")
         except (IndexError, ValueError):
             await update.message.reply_text("Uso: /admin remove <telegram_id>")
@@ -340,6 +356,8 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         username = context.args[1] if len(context.args) > 1 else None
         is_super = context.args[2].lower() in {"true", "admin", "1", "yes"} if len(context.args) > 2 else False
         await add_authorized_user(chat_id, username, is_super)
+        users = await list_authorized_users()
+        set_authorized_users_count(len(users))
         await update.message.reply_text(f"✅ Usuario {chat_id} guardado como {_role_label(is_super)}.")
     except ValueError:
         await update.message.reply_text("Uso: /admin <telegram_id> [username] [user|admin]\nEjemplo: /admin 123456789 rafa admin")
@@ -349,12 +367,14 @@ async def events_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if not await is_super_admin(update.effective_chat.id):
         await handle_unauthorized_user(update, "/events")
         return
-    
+
+    record_request("command_events", "authorized")
+
     events = await get_unauthorized_events(10)  # Get last 10 events
     if not events:
         await update.message.reply_text("No hay intentos no autorizados registrados.")
         return
-    
+
     message = "Últimos intentos no autorizados:\n\n"
     for event in events:
         chat_id, username, command, timestamp = event
@@ -363,7 +383,7 @@ async def events_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         message += f"🔍 Comando: {command}\n"
         message += f"⏰ Fecha: {timestamp}\n"
         message += "------------------------\n"
-    
+
     await update.message.reply_text(message)
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -372,6 +392,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await handle_unauthorized_user(update, "/start")
         return
 
+    record_request("command_start", "authorized")
     await _show_main_menu(update.effective_chat.id, context.bot)
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -380,6 +401,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await handle_unauthorized_user(update, "/help")
         return
 
+    record_request("command_help", "authorized")
     await update.message.reply_text(
         "Simplemente envía un enlace de video y te daré tres opciones:\n\n"
         "1. Descargar y enviar: El video se descargará y te lo enviaré en el chat\n"
@@ -461,6 +483,7 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         await handle_unauthorized_user(update)
         return
 
+    record_request("url", "authorized")
     url = update.message.text
     chat_id = update.effective_chat.id
     username = update.effective_user.username if update.effective_user else None
@@ -547,6 +570,11 @@ async def _handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_T
             return True
         is_super = query.data == "admin_add_role_admin"
         await add_authorized_user(int(draft["chat_id"]), draft.get("name"), is_super)
+        try:
+            users = await list_authorized_users()
+            set_authorized_users_count(len(users))
+        except Exception:
+            pass
         _clear_admin_add_flow(context)
         await query.edit_message_text(
             f"✅ Usuario `{draft['chat_id']}` guardado como *{_role_label(is_super)}*.\n"
@@ -581,10 +609,12 @@ def _format_progress(info: dict) -> str:
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle button callbacks."""
     if not await is_user_authorized(update.callback_query.message.chat_id):
+        record_request("callback", "unauthorized")
         await update.callback_query.answer("No estás autorizado para usar este bot.")
         await update.callback_query.message.delete()
         return
 
+    record_request("callback", "authorized")
     query = update.callback_query
     await query.answer()
 
@@ -619,6 +649,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         _sanitize_url_for_log(url),
     )
     
+    platform = detect_platform(url)
+    t_download_start = time.time()
+    record_download_start(platform)
+    download_recorded = False
+
     message = await query.edit_message_text("⏳ Procesando el enlace...")
     
     try:
@@ -646,20 +681,47 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 pass
 
         success, status_msg, video_path = await download_video(url, output_dir, progress_callback=progress_callback)
+        download_duration = time.time() - t_download_start
         
         if not success:
+            record_download_result(
+                platform=platform,
+                action=action,
+                success=False,
+                duration=download_duration,
+                error_msg=status_msg,
+            )
+            download_recorded = True
             raise Exception(status_msg)
         
+        v_size_bytes = video_path.stat().st_size if (video_path and video_path.exists()) else 0
+        record_download_result(
+            platform=platform,
+            action=action,
+            success=True,
+            duration=download_duration,
+            size_bytes=v_size_bytes,
+        )
+        download_recorded = True
+
         if query.data == "send":
             # Solo enviar
             await message.edit_text("📤 Enviando video...")
             # Make it Telegram-friendly (avoid still-frame+audio issues)
-            ok, _, send_path = await transcode_to_telegram_mp4(video_path)
+            t_transcode_start = time.time()
+            record_transcode_start()
+            ok, transcode_msg, send_path = await transcode_to_telegram_mp4(video_path)
+            record_transcode_result(
+                success=ok,
+                duration=time.time() - t_transcode_start,
+                skipped=(transcode_msg == "transcode disabled"),
+            )
             if not ok:
                 send_path = video_path
 
             size_mb = _file_size_mb(send_path)
             if size_mb > TELEGRAM_MAX_UPLOAD_MB:
+                record_telegram_upload("too_large", 0.0)
                 # Clean up (send-only should not keep large files)
                 try:
                     if send_path != video_path:
@@ -682,6 +744,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 return
 
             video_kwargs = await _telegram_video_kwargs(send_path)
+            t_upload_start = time.time()
             try:
                 await context.bot.send_video(
                     chat_id=chat_id,
@@ -691,8 +754,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                     height=video_kwargs.get("height"),
                     duration=video_kwargs.get("duration"),
                 )
+                record_telegram_upload("success", time.time() - t_upload_start)
             except BadRequest as e:
                 if "Request Entity Too Large" in str(e):
+                    record_telegram_upload("failed_413", time.time() - t_upload_start)
                     # Clean up
                     try:
                         if send_path != video_path:
@@ -712,6 +777,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                         "Usa la opción 'Descargar y guardar' para conservarlo en el servidor."
                     )
                     return
+                record_telegram_upload("error", time.time() - t_upload_start)
                 raise
             # Clean up
             try:
@@ -742,7 +808,14 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         else:  # save_and_send
             # Guardar y enviar
             await message.edit_text("📤 Enviando video...")
-            ok, _, send_path = await transcode_to_telegram_mp4(video_path)
+            t_transcode_start = time.time()
+            record_transcode_start()
+            ok, transcode_msg, send_path = await transcode_to_telegram_mp4(video_path)
+            record_transcode_result(
+                success=ok,
+                duration=time.time() - t_transcode_start,
+                skipped=(transcode_msg == "transcode disabled"),
+            )
             if ok and send_path != video_path:
                 # Replace saved file with Telegram-friendly one to avoid keeping two copies
                 try:
@@ -753,6 +826,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
             size_mb = _file_size_mb(video_path)
             if size_mb > TELEGRAM_MAX_UPLOAD_MB:
+                record_telegram_upload("too_large", 0.0)
                 # Keep file (it's in SAVED_VIDEOS_DIR)
                 logger.warning(
                     "action_failed chat_id=%s username=%s action=%s error=file_too_large size_mb=%.2f limit_mb=%.2f file=%s",
@@ -770,6 +844,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 return
 
             video_kwargs = await _telegram_video_kwargs(video_path)
+            t_upload_start = time.time()
             try:
                 await context.bot.send_video(
                     chat_id=chat_id,
@@ -779,8 +854,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                     height=video_kwargs.get("height"),
                     duration=video_kwargs.get("duration"),
                 )
+                record_telegram_upload("success", time.time() - t_upload_start)
             except BadRequest as e:
                 if "Request Entity Too Large" in str(e):
+                    record_telegram_upload("failed_413", time.time() - t_upload_start)
                     logger.warning(
                         "action_failed chat_id=%s username=%s action=%s error=telegram_413 size_mb=%.2f file=%s",
                         chat_id,
@@ -794,6 +871,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                         "⚠️ Telegram rechazó el envío por tamaño (413)."
                     )
                     return
+                record_telegram_upload("error", time.time() - t_upload_start)
                 raise
             await message.edit_text(
                 f"✅ Video guardado y enviado exitosamente como:\n"
@@ -808,6 +886,14 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             )
             
     except Exception as e:
+        if not download_recorded:
+            record_download_result(
+                platform=platform,
+                action=action,
+                success=False,
+                duration=time.time() - t_download_start,
+                error_msg=str(e),
+            )
         logger.warning(
             "action_failed chat_id=%s username=%s action=%s error=%s",
             query.message.chat_id,
@@ -839,6 +925,18 @@ async def main() -> None:
 
     # Initialize the database
     await init_db()
+
+    # Initialize authorized users metric
+    try:
+        users = await list_authorized_users()
+        set_authorized_users_count(len(users))
+    except Exception as exc:
+        logger.debug("Could not initialize authorized users count metric: %s", exc)
+
+    # Start Prometheus metrics exporter HTTP server
+    metrics_port = int(os.getenv("METRICS_PORT", "9099"))
+    metrics_host = os.getenv("METRICS_HOST", "0.0.0.0")
+    start_metrics_server(port=metrics_port, host=metrics_host)
         
     # Initialize Application
     application = Application.builder().token(TOKEN).build()
@@ -863,6 +961,17 @@ async def main() -> None:
         await application.initialize()
         await sync_bot_commands(application)
         await application.start()
+
+        # Background task for uptime metric
+        async def _uptime_loop():
+            while True:
+                try:
+                    update_uptime()
+                except Exception:
+                    pass
+                await asyncio.sleep(15)
+
+        application.create_task(_uptime_loop())
         
         stop_signal = asyncio.Future()
         
