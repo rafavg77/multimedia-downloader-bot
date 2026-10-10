@@ -20,7 +20,14 @@ from db_manager import (
     remove_authorized_user, list_authorized_users, log_unauthorized_attempt,
     get_unauthorized_events
 )
-from downloader import download_video, ensure_directories, probe_video_metadata, transcode_to_telegram_mp4
+from downloader import (
+    download_video,
+    download_series,
+    get_dramatip_series_info,
+    ensure_directories,
+    probe_video_metadata,
+    transcode_to_telegram_mp4,
+)
 from metrics import (
     start_metrics_server, update_uptime, detect_platform,
     record_request, record_unauthorized_attempt, record_download_start,
@@ -497,7 +504,13 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     # Store URL in user_data for later use
     context.user_data['current_url'] = url
     
-    # Create inline keyboard with three options
+    series_info = None
+    if detect_platform(url) == "dramatip":
+        try:
+            series_info = await asyncio.to_thread(get_dramatip_series_info, url)
+        except Exception as e:
+            logger.warning(f"Error detectando serie de DramaTip: {e}")
+
     keyboard = [
         [
             InlineKeyboardButton("📤 Descargar y enviar", callback_data="send"),
@@ -507,11 +520,32 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             InlineKeyboardButton("📤💾 Descargar, guardar y reenviar", callback_data="save_and_send")
         ]
     ]
+
+    if series_info and series_info.get("total_episodes", 0) > 1:
+        context.user_data['series_info'] = series_info
+        total = series_info['total_episodes']
+        keyboard.append([
+            InlineKeyboardButton(f"📦 Descargar todos los episodios ({total}) y guardar", callback_data="save_all")
+        ])
+        prompt_text = (
+            f"📺 *Serie detectada:* {series_info['title']}\n"
+            f"📑 *Episodios disponibles:* {total}\n\n"
+            f"¿Qué quieres hacer con este contenido?"
+        )
+    else:
+        context.user_data.pop('series_info', None)
+        prompt_text = "¿Qué quieres hacer con este video?"
+
+    keyboard.append([
+        InlineKeyboardButton("❌ Cancelar", callback_data="cancel")
+    ])
+
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     await update.message.reply_text(
-        "¿Qué quieres hacer con este video?",
-        reply_markup=reply_markup
+        prompt_text,
+        reply_markup=reply_markup,
+        parse_mode="Markdown" if series_info else None
     )
 
 async def _send_users_list(query) -> None:
@@ -633,6 +667,15 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await context.bot.send_message(chat_id=chat_id, text=text)
         return
     
+    if query.data == "cancel":
+        context.user_data.pop('current_url', None)
+        context.user_data.pop('series_info', None)
+        try:
+            await query.edit_message_text("❌ Operación cancelada. No se realizó ninguna descarga.")
+        except Exception:
+            pass
+        return
+
     url = context.user_data.get('current_url')
     if not url:
         await query.edit_message_text("❌ Lo siento, hubo un error. Por favor, envía el enlace nuevamente.")
@@ -657,6 +700,87 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     message = await query.edit_message_text("⏳ Procesando el enlace...")
     
     try:
+        if query.data == "save_all":
+            series_info = context.user_data.get('series_info')
+            if not series_info and platform == "dramatip":
+                series_info = await asyncio.to_thread(get_dramatip_series_info, url)
+
+            if not series_info:
+                await message.edit_text("❌ No se pudo obtener la información de los episodios de la serie.")
+                return
+
+            total_eps = series_info.get("total_episodes", len(series_info.get("episodes", [])))
+            series_title = series_info.get("title", "Serie")
+            output_dir = SAVED_VIDEOS_DIR
+
+            await message.edit_text(
+                f"⏳ Iniciando descarga de serie: *{series_title}*\nTotal de episodios: {total_eps}...",
+                parse_mode="Markdown",
+            )
+
+            last_update_time = [0.0]
+            last_reported_ep = [-1]
+            last_reported_pct = [-1]
+
+            async def series_progress_callback(info: dict) -> None:
+                ep = info.get("episode", 1)
+                total = info.get("total_episodes", total_eps)
+                pct = info.get("percent", 0)
+                completed = info.get("completed_count", 0)
+                now = time.time()
+
+                is_ep_change = (ep != last_reported_ep[0])
+                is_pct_step = (pct - last_reported_pct[0] >= 20)
+                is_time_step = (now - last_update_time[0] >= 3.0)
+
+                if not (is_ep_change or (is_pct_step and is_time_step)):
+                    return
+
+                last_update_time[0] = now
+                last_reported_ep[0] = ep
+                last_reported_pct[0] = pct
+
+                bar_length = 10
+                filled = int(pct / 100 * bar_length)
+                bar = "█" * filled + "░" * (bar_length - filled)
+
+                text = (
+                    f"📺 *Descargando serie:* {series_title}\n\n"
+                    f"📦 *Capítulo {ep}/{total}*: [{bar}] {pct}%\n"
+                    f"✅ *Guardados hasta ahora:* {completed}/{total}\n"
+                    f"📁 *Destino:* `/data/saved_videos/`"
+                )
+                try:
+                    await message.edit_text(text, parse_mode="Markdown")
+                except Exception:
+                    pass
+
+            successful, total_count, paths = await download_series(
+                series_info,
+                output_dir,
+                progress_callback=series_progress_callback,
+            )
+            download_duration = time.time() - t_download_start
+            total_size = sum(p.stat().st_size for p in paths if p.exists())
+
+            record_download_result(
+                platform=platform,
+                action=action,
+                success=(successful > 0),
+                duration=download_duration,
+                size_bytes=total_size,
+            )
+            download_recorded = True
+
+            text = (
+                f"✅ *¡Descarga de serie completada!*\n\n"
+                f"📺 *Serie:* {series_title}\n"
+                f"📦 *Capítulos guardados:* {successful}/{total_count}\n"
+                f"💾 *Ubicación:* Carpeta de videos guardados del servidor (`/data/saved_videos/`)"
+            )
+            await message.edit_text(text, parse_mode="Markdown")
+            return
+
         # Choose directory based on action
         output_dir = SAVED_VIDEOS_DIR if query.data in ["save", "save_and_send"] else DOWNLOAD_DIR
         

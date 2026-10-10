@@ -60,3 +60,25 @@ class TestDramaTipExtraction:
         stream_url, headers, custom_title = _prepare_download_target(url)
         assert "akamai-static.shorttv.live" in stream_url
         assert custom_title == "mi-hermana-creyo-haber-ganado-hasta-que-nacio-mi-heredero-dorado-capitulo-2"
+
+    def test_get_series_info(self):
+        from downloader import get_dramatip_series_info
+        url = "https://dramatip.net/es/series/mi-hermana-creyo-haber-ganado-hasta-que-nacio-mi-heredero-dorado"
+        info = get_dramatip_series_info(url)
+        assert info is not None
+        assert info["book_id"] == "43167"
+        assert info["total_episodes"] == 25
+        assert info["episodes"] == list(range(1, 26))
+        assert "Mi hermana creyó haber ganado" in info["title"]
+
+    def test_resolve_episode_stream(self):
+        from downloader import _resolve_dramatip_episode_stream
+        stream_url, headers, custom_title = _resolve_dramatip_episode_stream(
+            netloc="dramatip.net",
+            book_id="43167",
+            slug="mi-hermana-creyo-haber-ganado-hasta-que-nacio-mi-heredero-dorado",
+            lang="es",
+            episode=5,
+        )
+        assert "akamai-static.shorttv.live" in stream_url
+        assert custom_title == "mi-hermana-creyo-haber-ganado-hasta-que-nacio-mi-heredero-dorado-capitulo-5"

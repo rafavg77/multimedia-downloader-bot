@@ -242,6 +242,92 @@ def _decrypt_dramatip_enc(enc: str) -> str:
     return decrypted.decode("utf-8")
 
 
+def _resolve_dramatip_episode_stream(
+    netloc: str,
+    book_id: str,
+    slug: str,
+    lang: str,
+    episode: int,
+) -> tuple[str, dict[str, str], str]:
+    series_url = f"https://{netloc}/{lang}/series/{slug}"
+    api_url = f"https://{netloc}/api/episode-source/{book_id}/{episode}?lang={lang}&refresh=1"
+    api_req = Request(
+        api_url,
+        headers={
+            "User-Agent": DEFAULT_USER_AGENT,
+            "Referer": series_url,
+            "Accept": "application/json, text/plain, */*",
+        },
+    )
+    enc = None
+    try:
+        with urlopen(api_req, timeout=15) as api_resp:
+            data = json.loads(api_resp.read().decode("utf-8"))
+            chain = data.get("descriptor", {}).get("chain", [])
+            if chain and chain[0].get("enc"):
+                enc = chain[0]["enc"]
+    except Exception as e:
+        logger.warning(f"Error consultando API episode-source de DramaTip para ep {episode}: {e}")
+
+    if not enc:
+        raise ValueError(f"No se pudo obtener el token de reproducción del episodio {episode}")
+
+    stream_url = _decrypt_dramatip_enc(enc)
+    safe_slug = re.sub(r"[^a-zA-Z0-9_-]", "_", slug)
+    custom_title = f"{safe_slug}-capitulo-{episode}"
+    headers = {
+        "Referer": f"https://{netloc}/",
+        "User-Agent": DEFAULT_USER_AGENT,
+    }
+    return stream_url, headers, custom_title
+
+
+def get_dramatip_series_info(url: str) -> dict | None:
+    """Extracts series metadata, bookId, and list of all available episodes from a DramaTip URL."""
+    parsed = urlparse(url)
+    match = DRAMATIP_PATH_RE.match(parsed.path)
+    if not match:
+        return None
+
+    lang_match, slug, ep_match = match.groups()
+    lang = lang_match or "es"
+    netloc = (parsed.netloc or "dramatip.net").lower()
+
+    series_url = f"https://{netloc}/{lang}/series/{slug}"
+    try:
+        html = _fetch_text(series_url, referer=f"https://{netloc}/")
+    except Exception as e:
+        logger.warning(f"Error obteniendo página de serie DramaTip: {e}")
+        return None
+
+    book_match = re.search(r'bookId[\'":\s\\]+(\d+)', html)
+    if not book_match:
+        return None
+    book_id = book_match.group(1)
+
+    serials = re.findall(r'serial_number[\'":\s\\]+(\d+)', html)
+    links = re.findall(r'/series/[^/]+/episode-(\d+)', html)
+    all_eps = set(map(int, serials + links))
+    if not all_eps:
+        all_eps = {1}
+    episodes = sorted(list(all_eps))
+
+    title_match = re.search(r'<h1[^>]*>([^<]+)</h1>', html)
+    title = title_match.group(1).strip() if title_match else slug.replace("-", " ").title()
+
+    return {
+        "book_id": book_id,
+        "slug": slug,
+        "lang": lang,
+        "title": title,
+        "episodes": episodes,
+        "total_episodes": len(episodes),
+        "series_url": series_url,
+        "current_episode": int(ep_match) if ep_match else None,
+        "netloc": netloc,
+    }
+
+
 def _resolve_dramatip_stream(url: str) -> tuple[str, dict[str, str], str]:
     parsed = urlparse(url)
     match = DRAMATIP_PATH_RE.match(parsed.path)
@@ -253,37 +339,21 @@ def _resolve_dramatip_stream(url: str) -> tuple[str, dict[str, str], str]:
     lang_match, slug, ep_match = match.groups()
     lang = lang_match or "es"
     episode = int(ep_match) if ep_match else 1
+    netloc = (parsed.netloc or "dramatip.net").lower()
 
-    series_url = f"https://{parsed.netloc}/{lang}/series/{slug}"
-    html = _fetch_text(series_url, referer=f"https://{parsed.netloc}/")
+    series_url = f"https://{netloc}/{lang}/series/{slug}"
+    html = _fetch_text(series_url, referer=f"https://{netloc}/")
 
     book_match = re.search(r'bookId[\'":\s\\]+(\d+)', html)
     if not book_match:
         raise ValueError("No se pudo obtener el identificador de la serie en DramaTip")
     book_id = book_match.group(1)
 
-    enc = None
-    # 1. Intentar API oficial de obtención de fuente
     try:
-        api_url = f"https://{parsed.netloc}/api/episode-source/{book_id}/{episode}?lang={lang}&refresh=1"
-        api_req = Request(
-            api_url,
-            headers={
-                "User-Agent": DEFAULT_USER_AGENT,
-                "Referer": series_url,
-                "Accept": "application/json, text/plain, */*",
-            },
-        )
-        with urlopen(api_req, timeout=15) as api_resp:
-            data = json.loads(api_resp.read().decode("utf-8"))
-            chain = data.get("descriptor", {}).get("chain", [])
-            if chain and chain[0].get("enc"):
-                enc = chain[0]["enc"]
-    except Exception as e:
-        logger.warning(f"Error consultando API episode-source de DramaTip: {e}")
-
-    # 2. Fallback a datos incrustados en HTML si la API falla
-    if not enc:
+        return _resolve_dramatip_episode_stream(netloc, book_id, slug, lang, episode)
+    except Exception:
+        # Fallback a datos incrustados en HTML si la API falla
+        enc = None
         if episode == 1:
             m = re.search(r'sourceFirst[\'":\s\\]+[^{]*\{[^}]*\"enc\":\"([^\"]+)\"', html)
             if m:
@@ -293,17 +363,108 @@ def _resolve_dramatip_stream(url: str) -> tuple[str, dict[str, str], str]:
             if m:
                 enc = m.group(1)
 
-    if not enc:
-        raise ValueError(f"No se pudo obtener el token de reproducción del episodio {episode}")
+        if not enc:
+            raise ValueError(f"No se pudo obtener el token de reproducción del episodio {episode}")
 
-    stream_url = _decrypt_dramatip_enc(enc)
+        stream_url = _decrypt_dramatip_enc(enc)
+        safe_slug = re.sub(r"[^a-zA-Z0-9_-]", "_", slug)
+        custom_title = f"{safe_slug}-capitulo-{episode}"
+        headers = {
+            "Referer": f"https://{netloc}/",
+            "User-Agent": DEFAULT_USER_AGENT,
+        }
+        return stream_url, headers, custom_title
+
+
+async def download_series(
+    series_info: dict,
+    output_dir: Path,
+    progress_callback: Callable[[dict], Awaitable[None]] | None = None,
+) -> tuple[int, int, list[Path]]:
+    """
+    Downloads all episodes of a series into output_dir.
+    Returns: (successful_count: int, total_count: int, downloaded_paths: list[Path])
+    """
+    if not ensure_directories(output_dir):
+        raise ValueError(f"Error: No se puede acceder al directorio {output_dir}")
+
+    safe_dir = str(output_dir.expanduser().resolve())
+    netloc = series_info.get("netloc", "dramatip.net")
+    book_id = series_info.get("book_id")
+    slug = series_info.get("slug", "series")
+    lang = series_info.get("lang", "es")
+    episodes = series_info.get("episodes", [])
+    total = len(episodes)
     safe_slug = re.sub(r"[^a-zA-Z0-9_-]", "_", slug)
-    custom_title = f"{safe_slug}-capitulo-{episode}"
-    headers = {
-        "Referer": f"https://{parsed.netloc}/",
-        "User-Agent": DEFAULT_USER_AGENT,
-    }
-    return stream_url, headers, custom_title
+
+    successful_count = 0
+    downloaded_paths: list[Path] = []
+    loop = asyncio.get_running_loop()
+
+    for ep in episodes:
+        target_name = f"{safe_slug}-capitulo-{ep}.mp4"
+        target_path = Path(safe_dir) / target_name
+
+        if target_path.exists() and target_path.stat().st_size > 0:
+            logger.info(f"Capítulo {ep} ya existe ({target_path.stat().st_size} bytes), omitiendo descarga.")
+            successful_count += 1
+            downloaded_paths.append(target_path)
+            if progress_callback:
+                try:
+                    await progress_callback({
+                        "episode": ep,
+                        "total_episodes": total,
+                        "percent": 100,
+                        "completed_count": successful_count,
+                        "status": "finished",
+                    })
+                except Exception:
+                    pass
+            continue
+
+        try:
+            stream_url, headers, custom_title = _resolve_dramatip_episode_stream(
+                netloc=netloc,
+                book_id=book_id,
+                slug=slug,
+                lang=lang,
+                episode=ep,
+            )
+            outtmpl = f"{safe_dir}/{custom_title}.%(ext)s"
+
+            def ep_hook(info: dict) -> None:
+                if not progress_callback:
+                    return
+                st = info.get("status")
+                total_b = info.get("total_bytes") or info.get("total_bytes_estimate")
+                down_b = info.get("downloaded_bytes") or 0
+                pct = int(down_b * 100 / total_b) if total_b else 0
+                if st == "finished":
+                    pct = 100
+                payload = {
+                    "episode": ep,
+                    "total_episodes": total,
+                    "percent": pct,
+                    "completed_count": successful_count,
+                    "status": st,
+                }
+                asyncio.run_coroutine_threadsafe(progress_callback(payload), loop)
+
+            await asyncio.to_thread(_run_ytdlp_download, stream_url, outtmpl, headers, ep_hook)
+
+            if target_path.exists() and target_path.stat().st_size > 0:
+                successful_count += 1
+                downloaded_paths.append(target_path)
+            else:
+                candidates = [p for p in Path(safe_dir).glob(f"{custom_title}.*") if p.is_file() and p.stat().st_size > 0]
+                if candidates:
+                    latest = max(candidates, key=lambda x: x.stat().st_mtime)
+                    successful_count += 1
+                    downloaded_paths.append(latest)
+        except Exception as e:
+            logger.error(f"Error descargando capítulo {ep} de {slug}: {e}")
+
+    return successful_count, total, downloaded_paths
 
 
 def _prepare_download_target(url: str) -> tuple[str, dict[str, str], str | None]:
