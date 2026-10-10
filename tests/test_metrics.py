@@ -60,6 +60,10 @@ class TestPlatformDetection:
     def test_flixgaze_urls(self):
         assert detect_platform("https://www.flixgaze.com/embed/123456") == "flixgaze"
 
+    def test_dramatip_urls(self):
+        assert detect_platform("https://dramatip.net/es/series/mi-hermana-creyo-haber-ganado-hasta-que-nacio-mi-heredero-dorado") == "dramatip"
+        assert detect_platform("https://dramatip.net/es/series/mi-hermana-creyo-haber-ganado-hasta-que-nacio-mi-heredero-dorado/episode-2") == "dramatip"
+
     def test_unknown_and_invalid(self):
         assert detect_platform("https://example.com/video.mp4") == "other"
         assert detect_platform("") == "unknown"

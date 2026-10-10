@@ -188,6 +188,8 @@ def detect_platform(url: str) -> str:
             return "dailymotion"
         elif "flixgaze.com" in host:
             return "flixgaze"
+        elif "dramatip.net" in host:
+            return "dramatip"
         return "other"
     except Exception:
         return "unknown"

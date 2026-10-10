@@ -1,11 +1,15 @@
-import logging
 import asyncio
+import base64
+import json
+import logging
 import os
 import re
 from pathlib import Path
 from typing import Awaitable, Callable, Tuple
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
+
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 import yt_dlp
 from yt_dlp.utils import DownloadError
@@ -38,6 +42,11 @@ DEFAULT_USER_AGENT = (
 )
 FLIXGAZE_PLAYER_RE = re.compile(
     r'const\s+pathId="(?P<path>[^"]+)",\s*domainId="(?P<domain>[^"]+)",\s*videoId="(?P<video>[^"]+)"',
+    re.IGNORECASE,
+)
+DRAMATIP_KEY = base64.b64decode("QC6Ir2trghxRAyyyWZEOEFR4GgLhnfQ4A19I3QBlQkc=")
+DRAMATIP_PATH_RE = re.compile(
+    r"^/(?:([a-z]{2}(?:-[a-zA-Z]{2})?)/)?series/([^/]+)(?:/episode-(\d+))?/?$",
     re.IGNORECASE,
 )
 
@@ -149,6 +158,7 @@ def validate_url(url: str) -> bool:
         'redd.it',
         'dailymotion.com',
         'flixgaze.com',
+        'dramatip.net',
     }
     trusted_exact_hosts = {
         'youtu.be',
@@ -223,11 +233,87 @@ def _resolve_flixgaze_stream(url: str) -> tuple[str, dict[str, str]]:
     return stream_url, {"Referer": url, "User-Agent": DEFAULT_USER_AGENT}
 
 
-def _prepare_download_target(url: str) -> tuple[str, dict[str, str]]:
+def _decrypt_dramatip_enc(enc: str) -> str:
+    raw = base64.b64decode(enc)
+    iv = raw[:12]
+    ciphertext = raw[12:]
+    aesgcm = AESGCM(DRAMATIP_KEY)
+    decrypted = aesgcm.decrypt(iv, ciphertext, None)
+    return decrypted.decode("utf-8")
+
+
+def _resolve_dramatip_stream(url: str) -> tuple[str, dict[str, str], str]:
+    parsed = urlparse(url)
+    match = DRAMATIP_PATH_RE.match(parsed.path)
+    if not match:
+        raise ValueError(
+            "URL de DramaTip no válida. Formato esperado: https://dramatip.net/es/series/<slug> o .../episode-<num>"
+        )
+
+    lang_match, slug, ep_match = match.groups()
+    lang = lang_match or "es"
+    episode = int(ep_match) if ep_match else 1
+
+    series_url = f"https://{parsed.netloc}/{lang}/series/{slug}"
+    html = _fetch_text(series_url, referer=f"https://{parsed.netloc}/")
+
+    book_match = re.search(r'bookId[\'":\s\\]+(\d+)', html)
+    if not book_match:
+        raise ValueError("No se pudo obtener el identificador de la serie en DramaTip")
+    book_id = book_match.group(1)
+
+    enc = None
+    # 1. Intentar API oficial de obtención de fuente
+    try:
+        api_url = f"https://{parsed.netloc}/api/episode-source/{book_id}/{episode}?lang={lang}&refresh=1"
+        api_req = Request(
+            api_url,
+            headers={
+                "User-Agent": DEFAULT_USER_AGENT,
+                "Referer": series_url,
+                "Accept": "application/json, text/plain, */*",
+            },
+        )
+        with urlopen(api_req, timeout=15) as api_resp:
+            data = json.loads(api_resp.read().decode("utf-8"))
+            chain = data.get("descriptor", {}).get("chain", [])
+            if chain and chain[0].get("enc"):
+                enc = chain[0]["enc"]
+    except Exception as e:
+        logger.warning(f"Error consultando API episode-source de DramaTip: {e}")
+
+    # 2. Fallback a datos incrustados en HTML si la API falla
+    if not enc:
+        if episode == 1:
+            m = re.search(r'sourceFirst[\'":\s\\]+[^{]*\{[^}]*\"enc\":\"([^\"]+)\"', html)
+            if m:
+                enc = m.group(1)
+        elif episode == 2:
+            m = re.search(r'nextSourceFirst[\'":\s\\]+[^{]*\{[^}]*\"enc\":\"([^\"]+)\"', html)
+            if m:
+                enc = m.group(1)
+
+    if not enc:
+        raise ValueError(f"No se pudo obtener el token de reproducción del episodio {episode}")
+
+    stream_url = _decrypt_dramatip_enc(enc)
+    safe_slug = re.sub(r"[^a-zA-Z0-9_-]", "_", slug)
+    custom_title = f"{safe_slug}-capitulo-{episode}"
+    headers = {
+        "Referer": f"https://{parsed.netloc}/",
+        "User-Agent": DEFAULT_USER_AGENT,
+    }
+    return stream_url, headers, custom_title
+
+
+def _prepare_download_target(url: str) -> tuple[str, dict[str, str], str | None]:
     host = (urlparse(url).netloc or "").lower()
     if host == "www.flixgaze.com" or host.endswith(".flixgaze.com"):
-        return _resolve_flixgaze_stream(url)
-    return url, {}
+        stream_url, headers = _resolve_flixgaze_stream(url)
+        return stream_url, headers, None
+    if host == "dramatip.net" or host.endswith(".dramatip.net"):
+        return _resolve_dramatip_stream(url)
+    return url, {}, None
 
 
 def _build_yt_dlp_command(url: str, outtmpl: str, headers: dict[str, str]) -> list[str]:
@@ -375,8 +461,11 @@ async def download_video(url: str, output_dir: Path, progress_callback: Progress
 
     try:
         safe_dir = str(output_dir.expanduser().resolve())
-        outtmpl = f"{safe_dir}/%(title).200B-%(id)s.%(ext)s"
-        effective_url, headers = _prepare_download_target(url)
+        effective_url, headers, custom_title = _prepare_download_target(url)
+        if custom_title:
+            outtmpl = f"{safe_dir}/{custom_title}.%(ext)s"
+        else:
+            outtmpl = f"{safe_dir}/%(title).200B-%(id)s.%(ext)s"
         loop = asyncio.get_running_loop()
 
         def hook(info: dict) -> None:
