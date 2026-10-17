@@ -275,8 +275,8 @@ def _resolve_dramatip_episode_stream(
     stream_url = _decrypt_dramatip_enc(enc)
     safe_slug = re.sub(r"[^a-zA-Z0-9_-]", "_", slug)
     custom_title = f"{safe_slug}-capitulo-{episode}"
+    # Do not pass Referer to CDN HLS streams: acfs1.goodreels.com rejects Referer: https://dramatip.net/ with HTTP 403
     headers = {
-        "Referer": f"https://{netloc}/",
         "User-Agent": DEFAULT_USER_AGENT,
     }
     return stream_url, headers, custom_title
@@ -370,7 +370,6 @@ def _resolve_dramatip_stream(url: str) -> tuple[str, dict[str, str], str]:
         safe_slug = re.sub(r"[^a-zA-Z0-9_-]", "_", slug)
         custom_title = f"{safe_slug}-capitulo-{episode}"
         headers = {
-            "Referer": f"https://{netloc}/",
             "User-Agent": DEFAULT_USER_AGENT,
         }
         return stream_url, headers, custom_title

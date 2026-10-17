@@ -49,16 +49,16 @@ class TestDramaTipExtraction:
     def test_resolve_live_stream(self):
         url = "https://dramatip.net/es/series/mi-hermana-creyo-haber-ganado-hasta-que-nacio-mi-heredero-dorado"
         stream_url, headers, custom_title = _resolve_dramatip_stream(url)
-        assert "akamai-static.shorttv.live" in stream_url
+        assert "shorttv.live" in stream_url
         assert stream_url.endswith(".m3u8")
-        assert "Referer" in headers
+        assert "Referer" not in headers
         assert "User-Agent" in headers
         assert custom_title == "mi-hermana-creyo-haber-ganado-hasta-que-nacio-mi-heredero-dorado-capitulo-1"
 
     def test_prepare_download_target_integration(self):
         url = "https://dramatip.net/es/series/mi-hermana-creyo-haber-ganado-hasta-que-nacio-mi-heredero-dorado/episode-2"
         stream_url, headers, custom_title = _prepare_download_target(url)
-        assert "akamai-static.shorttv.live" in stream_url
+        assert "shorttv.live" in stream_url
         assert custom_title == "mi-hermana-creyo-haber-ganado-hasta-que-nacio-mi-heredero-dorado-capitulo-2"
 
     def test_get_series_info(self):
@@ -80,5 +80,24 @@ class TestDramaTipExtraction:
             lang="es",
             episode=5,
         )
-        assert "akamai-static.shorttv.live" in stream_url
+        assert "shorttv.live" in stream_url
+        assert "Referer" not in headers
         assert custom_title == "mi-hermana-creyo-haber-ganado-hasta-que-nacio-mi-heredero-dorado-capitulo-5"
+
+    def test_resolve_goodreels_episode_stream(self):
+        from downloader import _resolve_dramatip_episode_stream
+        from urllib.request import Request, urlopen
+        stream_url, headers, custom_title = _resolve_dramatip_episode_stream(
+            netloc="dramatip.net",
+            book_id="31001834425",
+            slug="no-soy-tu-pareja-soy-la-luna-de-tu-hermano-31001834425",
+            lang="es",
+            episode=11,
+        )
+        assert "goodreels.com" in stream_url
+        assert "Referer" not in headers
+        req = Request(stream_url, headers=headers)
+        with urlopen(req, timeout=15) as resp:
+            assert resp.status == 200
+            assert "#EXTM3U" in resp.read().decode("utf-8")
+
