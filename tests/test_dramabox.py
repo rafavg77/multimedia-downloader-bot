@@ -98,8 +98,9 @@ class TestDramaBoxExtraction:
 
     def test_extract_first_url(self):
         raw_accented = "https://www.dramaboxdb.com/es/movie/41000120981/el-dolor-después-del-adiós-doblado"
-        assert extract_first_url(raw_accented) == raw_accented
-        assert extract_first_url(f"Mira este drama: {raw_accented}!") == raw_accented
+        expected = "https://www.dramaboxdb.com/es/movie/41000120981/el-dolor-despu%C3%A9s-del-adi%C3%B3s-doblado"
+        assert extract_first_url(raw_accented) == expected
+        assert extract_first_url(f"Mira este drama: {raw_accented}!") == expected
         assert extract_first_url("Texto sin ninguna url") is None
         assert extract_first_url("") is None
 

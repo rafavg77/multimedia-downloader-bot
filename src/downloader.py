@@ -9,7 +9,7 @@ import tempfile
 import unicodedata
 from pathlib import Path
 from typing import Awaitable, Callable, Tuple
-from urllib.parse import unquote, urljoin, urlparse, urlunparse
+from urllib.parse import quote, unquote, urljoin, urlparse, urlunparse, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
@@ -157,13 +157,22 @@ async def transcode_to_telegram_mp4(input_path: Path) -> Tuple[bool, str, Path]:
         logger.error(f"Error transcoding video: {e}")
         return False, f"transcode error: {e}", input_path
 
+def safe_quote_url(url: str) -> str:
+    """Ensures URL path is safely ASCII-encoded for HTTP request lines without double-encoding."""
+    p = urlsplit(url)
+    unquoted_path = unquote(p.path)
+    safe_path = quote(unquoted_path, safe="/:@&=+$,-_.!~*'()")
+    return urlunsplit((p.scheme, p.netloc, safe_path, p.query, p.fragment))
+
+
 def extract_first_url(text: str | None) -> str | None:
     """Extracts the first HTTP/HTTPS URL from a string, handling accents and surrounding text."""
     if not text:
         return None
     m = re.search(r"https?://[^\s<>\"'`]+", text, re.IGNORECASE)
     if m:
-        return m.group(0).rstrip(".,;!?:)]}\"'")
+        raw = m.group(0).rstrip(".,;!?:)]}\"'")
+        return safe_quote_url(raw)
     return None
 
 
@@ -235,9 +244,10 @@ def _fetch_text(url: str, referer: str | None = None) -> str:
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     }
     if referer:
-        headers["Referer"] = referer
+        headers["Referer"] = safe_quote_url(referer)
 
-    request = Request(url, headers=headers)
+    safe_url = safe_quote_url(url)
+    request = Request(safe_url, headers=headers)
     with urlopen(request, timeout=20) as response:
         return response.read().decode("utf-8", errors="ignore")
 
