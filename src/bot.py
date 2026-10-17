@@ -790,7 +790,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                         f"📺 *Descargando serie:* {series_title}\n\n"
                         f"📦 *Capítulo {ep}/{total}*: [{bar}] {pct}%\n"
                         f"✅ *Guardados hasta ahora:* {completed}/{total}\n"
-                        f"📁 *Destino:* `/data/saved_videos/{series_folder}/`"
+                        f"📁 *Destino:* `/data/saved_videos/{series_folder}/Season 01/`"
                     )
                     try:
                         await message.edit_text(text, parse_mode="Markdown")
@@ -826,7 +826,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 f"✅ *¡Descarga de serie completada!*\n\n"
                 f"📺 *Serie:* {series_title}\n"
                 f"📦 *Capítulos guardados:* {successful}/{total_count}\n"
-                f"💾 *Ubicación:* `/data/saved_videos/{series_folder}/`"
+                f"💾 *Ubicación:* `/data/saved_videos/{series_folder}/Season 01/`"
             )
             await message.edit_text(text, parse_mode="Markdown")
             return

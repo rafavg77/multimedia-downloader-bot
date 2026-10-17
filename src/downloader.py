@@ -306,7 +306,7 @@ def _resolve_dramatip_episode_stream(
 
     stream_url = _decrypt_dramatip_enc(enc)
     safe_slug = re.sub(r"[^a-zA-Z0-9_-]", "_", slug)
-    custom_title = f"{safe_slug}-capitulo-{episode}"
+    custom_title = f"{safe_slug} - S01E{episode:02d}"
     # Do not pass Referer to CDN HLS streams: acfs1.goodreels.com rejects Referer: https://dramatip.net/ with HTTP 403
     headers = {
         "User-Agent": DEFAULT_USER_AGENT,
@@ -400,7 +400,7 @@ def _resolve_dramatip_stream(url: str) -> tuple[str, dict[str, str], str]:
 
         stream_url = _decrypt_dramatip_enc(enc)
         safe_slug = re.sub(r"[^a-zA-Z0-9_-]", "_", slug)
-        custom_title = f"{safe_slug}-capitulo-{episode}"
+        custom_title = f"{safe_slug} - S01E{episode:02d}"
         headers = {
             "User-Agent": DEFAULT_USER_AGENT,
         }
@@ -522,7 +522,7 @@ def _resolve_dramabox_episode_stream(
     if not stream_url:
         raise ValueError(f"No se pudo obtener el enlace de reproducción para el capítulo {episode} en DramaBox.")
 
-    custom_title = f"{slug}-capitulo-{episode}"
+    custom_title = f"{slug} - S01E{episode:02d}"
     headers = {"User-Agent": DEFAULT_USER_AGENT}
     return stream_url, headers, custom_title
 
@@ -577,7 +577,8 @@ async def download_series(
     total = len(episodes)
     safe_slug = re.sub(r"[^a-zA-Z0-9_-]", "_", slug)
 
-    series_dir = output_dir.expanduser().resolve() / safe_slug
+    series_base_dir = output_dir.expanduser().resolve() / safe_slug
+    series_dir = series_base_dir / "Season 01"
     if not ensure_directories(series_dir):
         raise ValueError(f"Error: No se puede acceder al directorio {series_dir}")
 
@@ -587,13 +588,25 @@ async def download_series(
     loop = asyncio.get_running_loop()
 
     for ep in episodes:
-        target_name = f"{safe_slug}-capitulo-{ep}.mp4"
+        target_name = f"{safe_slug} - S01E{ep:02d}.mp4"
         target_path = series_dir / target_name
 
-        if target_path.exists() and target_path.stat().st_size >= MIN_VALID_EPISODE_BYTES:
-            logger.info(f"Capítulo {ep} ya existe ({target_path.stat().st_size} bytes), omitiendo descarga.")
+        candidate_paths = [
+            target_path,
+            series_base_dir / target_name,
+            series_base_dir / f"{safe_slug}-capitulo-{ep}.mp4",
+            series_dir / f"{safe_slug}-capitulo-{ep}.mp4",
+            output_dir / f"{safe_slug}-capitulo-{ep}.mp4",
+        ]
+        found_existing = next(
+            (p for p in candidate_paths if p.exists() and p.stat().st_size >= MIN_VALID_EPISODE_BYTES),
+            None,
+        )
+
+        if found_existing:
+            logger.info(f"Capítulo {ep} ya existe ({found_existing.stat().st_size} bytes en {found_existing.name}), omitiendo descarga.")
             successful_count += 1
-            downloaded_paths.append(target_path)
+            downloaded_paths.append(found_existing)
             if progress_callback:
                 try:
                     await progress_callback({

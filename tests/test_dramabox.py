@@ -141,7 +141,7 @@ class TestDramaBoxExtraction:
         stream_url, headers, custom_title = _resolve_dramabox_stream(url)
         assert stream_url == "https://hwvideoseo.dramaboxdb.com/sample_ep1.mp4"
         assert "User-Agent" in headers
-        assert custom_title == "el-dolor-despues-del-adios-doblado-capitulo-1"
+        assert custom_title == "el-dolor-despues-del-adios-doblado - S01E01"
 
     def test_resolve_locked_stream_free_preview_mocked(self, monkeypatch):
         def mock_fetch(url, referer=None):
@@ -153,14 +153,14 @@ class TestDramaBoxExtraction:
         url = "https://www.dramaboxdb.com/es/ep/41000120981_el-dolor-despu%C3%A9s-del-adi%C3%B3s-doblado/600126902_Episode-2"
         stream_url, headers, custom_title = _resolve_dramabox_stream(url)
         assert stream_url == "https://hwztvideo.dramaboxdb.com/sample_ep2.nav2.15s.mp4"
-        assert custom_title == "el-dolor-despues-del-adios-doblado-capitulo-2"
+        assert custom_title == "el-dolor-despues-del-adios-doblado - S01E02"
 
     def test_prepare_download_target_integration_mocked(self, monkeypatch):
         monkeypatch.setattr(downloader, "_fetch_text", lambda *args, **kwargs: MOCK_MOVIE_PAGE_HTML)
         url = "https://www.dramaboxdb.com/es/ep/41000120981_el-dolor-despu%C3%A9s-del-adi%C3%B3s-doblado/600126901_Episode-1"
         stream_url, headers, custom_title = _prepare_download_target(url)
         assert stream_url == "https://hwvideoseo.dramaboxdb.com/sample_ep1.mp4"
-        assert custom_title == "el-dolor-despues-del-adios-doblado-capitulo-1"
+        assert custom_title == "el-dolor-despues-del-adios-doblado - S01E01"
 
     def test_live_network_probe(self):
         """Attempts live probe if network/CDN permits, skips cleanly on 403 or network restriction."""

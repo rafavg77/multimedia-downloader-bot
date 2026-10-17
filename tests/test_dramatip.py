@@ -53,13 +53,13 @@ class TestDramaTipExtraction:
         assert stream_url.endswith(".m3u8")
         assert "Referer" not in headers
         assert "User-Agent" in headers
-        assert custom_title == "mi-hermana-creyo-haber-ganado-hasta-que-nacio-mi-heredero-dorado-capitulo-1"
+        assert custom_title == "mi-hermana-creyo-haber-ganado-hasta-que-nacio-mi-heredero-dorado - S01E01"
 
     def test_prepare_download_target_integration(self):
         url = "https://dramatip.net/es/series/mi-hermana-creyo-haber-ganado-hasta-que-nacio-mi-heredero-dorado/episode-2"
         stream_url, headers, custom_title = _prepare_download_target(url)
         assert "shorttv.live" in stream_url
-        assert custom_title == "mi-hermana-creyo-haber-ganado-hasta-que-nacio-mi-heredero-dorado-capitulo-2"
+        assert custom_title == "mi-hermana-creyo-haber-ganado-hasta-que-nacio-mi-heredero-dorado - S01E02"
 
     def test_get_series_info(self):
         from downloader import get_dramatip_series_info
@@ -82,7 +82,7 @@ class TestDramaTipExtraction:
         )
         assert "shorttv.live" in stream_url
         assert "Referer" not in headers
-        assert custom_title == "mi-hermana-creyo-haber-ganado-hasta-que-nacio-mi-heredero-dorado-capitulo-5"
+        assert custom_title == "mi-hermana-creyo-haber-ganado-hasta-que-nacio-mi-heredero-dorado - S01E05"
 
     def test_resolve_goodreels_episode_stream(self):
         from downloader import _resolve_dramatip_episode_stream
@@ -105,9 +105,9 @@ class TestDramaTipExtraction:
         import asyncio
         from downloader import download_series, MIN_VALID_EPISODE_BYTES
         slug = "serie-prueba-subfolder"
-        series_dir = tmp_path / slug
-        series_dir.mkdir(parents=True)
-        existing_ep = series_dir / f"{slug}-capitulo-1.mp4"
+        season_dir = tmp_path / slug / "Season 01"
+        season_dir.mkdir(parents=True)
+        existing_ep = season_dir / f"{slug} - S01E01.mp4"
         existing_ep.write_bytes(b"0" * MIN_VALID_EPISODE_BYTES)
 
         series_info = {
@@ -121,6 +121,6 @@ class TestDramaTipExtraction:
         assert successful == 1
         assert total == 1
         assert paths == [existing_ep]
-        assert paths[0].parent == tmp_path / slug
+        assert paths[0].parent == season_dir
 
 
