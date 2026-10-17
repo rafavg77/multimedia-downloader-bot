@@ -5,7 +5,9 @@ HTTP metrics exporter server for scraping by Prometheus.
 """
 
 import logging
+import os
 import time
+from pathlib import Path
 from typing import Optional
 from urllib.parse import urlparse
 
@@ -155,7 +157,44 @@ LAST_DOWNLOAD_PLATFORM = Info(
     "Información sobre la plataforma y acción de la última descarga",
 )
 
+# --- Series Pipeline ---
+SERIES_DOWNLOADS_TOTAL = Counter(
+    "mediabot_series_downloads_total",
+    "Total de series descargadas completas",
+    ["platform", "status"],
+)
+
+SERIES_EPISODES_TOTAL = Counter(
+    "mediabot_series_episodes_total",
+    "Total de episodios procesados en series",
+    ["platform", "status"],
+)
+
+# --- Persistent Storage Metrics ---
+STORAGE_SAVED_VIDEOS_COUNT = Gauge(
+    "mediabot_storage_saved_videos_count",
+    "Número total de archivos de video en almacenamiento persistente",
+)
+
+STORAGE_SAVED_VIDEOS_BYTES = Gauge(
+    "mediabot_storage_saved_videos_bytes",
+    "Bytes totales ocupados por videos en almacenamiento persistente",
+)
+
 # Internal state
+KNOWN_PLATFORMS = (
+    "youtube",
+    "tiktok",
+    "instagram",
+    "facebook",
+    "x_twitter",
+    "dramatip",
+    "dramabox",
+    "dailymotion",
+    "reddit",
+    "flixgaze",
+    "other",
+)
 _metrics_server_started = False
 _service_start_time: float = time.time()
 
@@ -172,26 +211,26 @@ def detect_platform(url: str) -> str:
         if ":" in host:
             host = host.split(":", 1)[0]
 
-        if "tiktok.com" in host:
+        if host == "tiktok.com" or host.endswith(".tiktok.com"):
             return "tiktok"
-        elif "instagram.com" in host:
+        elif host == "instagram.com" or host.endswith(".instagram.com"):
             return "instagram"
-        elif "youtube.com" in host or host == "youtu.be" or host.endswith(".youtube.com"):
+        elif host == "youtube.com" or host.endswith(".youtube.com") or host == "youtu.be" or host.endswith(".youtu.be"):
             return "youtube"
-        elif "x.com" in host or "twitter.com" in host:
+        elif host == "x.com" or host.endswith(".x.com") or host == "twitter.com" or host.endswith(".twitter.com"):
             return "x_twitter"
-        elif "facebook.com" in host or "fb.watch" in host:
+        elif host == "facebook.com" or host.endswith(".facebook.com") or host == "fb.watch" or host.endswith(".fb.watch"):
             return "facebook"
-        elif "reddit.com" in host or "redd.it" in host:
+        elif host == "reddit.com" or host.endswith(".reddit.com") or host == "redd.it" or host.endswith(".redd.it"):
             return "reddit"
-        elif "dailymotion.com" in host:
+        elif host == "dailymotion.com" or host.endswith(".dailymotion.com") or host == "dai.ly" or host.endswith(".dai.ly"):
             return "dailymotion"
-        elif "flixgaze.com" in host:
-            return "flixgaze"
-        elif "dramatip.net" in host:
-            return "dramatip"
-        elif "dramaboxdb.com" in host:
+        elif "dramabox" in host:
             return "dramabox"
+        elif "dramatip" in host:
+            return "dramatip"
+        elif "flixgaze" in host:
+            return "flixgaze"
         return "other"
     except Exception:
         return "unknown"
@@ -285,6 +324,159 @@ def record_download_result(
         logger.debug(f"Failed to record download result metric: {e}")
 
 
+def record_episode_download(
+    platform: str,
+    success: bool,
+    duration: float,
+    size_bytes: int = 0,
+    error_msg: str = "",
+) -> None:
+    """Record outcome of an individual episode within a series batch."""
+    now = time.time()
+    status = "success" if success else "failed"
+
+    try:
+        DOWNLOADS_TOTAL.labels(platform=platform, status=status, action="save").inc()
+        SERIES_EPISODES_TOTAL.labels(platform=platform, status=status).inc()
+        DOWNLOAD_DURATION_SECONDS.labels(platform=platform).observe(max(0.001, duration))
+
+        LAST_DOWNLOAD_TIMESTAMP_SECONDS.set(now)
+        LAST_DOWNLOAD_SUCCESS.set(1 if success else 0)
+        LAST_DOWNLOAD_DURATION_SECONDS.set(duration)
+
+        LAST_DOWNLOAD_PLATFORM.info({
+            "platform": platform,
+            "action": "save",
+            "status": status,
+        })
+
+        if success and size_bytes > 0:
+            DOWNLOAD_BYTES_TOTAL.labels(platform=platform).inc(size_bytes)
+            DOWNLOAD_FILE_SIZE_BYTES.labels(platform=platform).observe(size_bytes)
+            LAST_DOWNLOAD_SIZE_BYTES.set(size_bytes)
+        elif not success:
+            err_cat = categorize_error(error_msg)
+            ERRORS_TOTAL.labels(category=err_cat, platform=platform).inc()
+    except Exception as e:
+        logger.debug(f"Failed to record episode download metric: {e}")
+
+
+def record_series_start(platform: str) -> None:
+    """Track beginning of a batch series download job."""
+    try:
+        ACTIVE_DOWNLOADS.inc()
+    except Exception as e:
+        logger.debug(f"Failed to record series start metric: {e}")
+
+
+def record_series_result(
+    platform: str,
+    success: bool,
+    total_episodes: int,
+    successful_episodes: int,
+    duration: float = 0.0,
+) -> None:
+    """Track completion of a batch series download job."""
+    try:
+        ACTIVE_DOWNLOADS.dec()
+    except Exception:
+        pass
+
+    status = "success" if success else "failed"
+    try:
+        SERIES_DOWNLOADS_TOTAL.labels(platform=platform, status=status).inc()
+    except Exception as e:
+        logger.debug(f"Failed to record series result metric: {e}")
+
+
+def init_metrics_registry() -> None:
+    """Pre-initialize Prometheus counters and gauges so Grafana doesn't show No Data on fresh start."""
+    try:
+        ACTIVE_DOWNLOADS.set(0)
+        ACTIVE_TRANSCODES.set(0)
+        LAST_DOWNLOAD_SUCCESS.set(-1)
+        LAST_DOWNLOAD_TIMESTAMP_SECONDS.set(0)
+        LAST_DOWNLOAD_DURATION_SECONDS.set(0)
+        LAST_DOWNLOAD_SIZE_BYTES.set(0)
+        STORAGE_SAVED_VIDEOS_COUNT.set(0)
+        STORAGE_SAVED_VIDEOS_BYTES.set(0)
+
+        for p in KNOWN_PLATFORMS:
+            DOWNLOADS_TOTAL.labels(platform=p, status="success", action="save")
+            DOWNLOADS_TOTAL.labels(platform=p, status="success", action="send")
+            DOWNLOADS_TOTAL.labels(platform=p, status="failed", action="save")
+            DOWNLOAD_BYTES_TOTAL.labels(platform=p)
+            SERIES_DOWNLOADS_TOTAL.labels(platform=p, status="success")
+            SERIES_EPISODES_TOTAL.labels(platform=p, status="success")
+
+        for st in ("success", "failed", "skipped"):
+            TRANSCODES_TOTAL.labels(status=st)
+
+        for st in ("success", "failed_413", "failed_size_limit", "error"):
+            TELEGRAM_UPLOADS_TOTAL.labels(status=st)
+
+        for req in ("url", "command_start", "command_help", "command_admin", "callback"):
+            REQUESTS_TOTAL.labels(type=req, status="authorized")
+    except Exception as e:
+        logger.debug(f"Failed to pre-initialize metrics registry: {e}")
+
+
+def update_storage_metrics(saved_videos_dir: Optional[Path] = None) -> None:
+    """Scan saved_videos directory and update storage gauges and last download info if needed."""
+    if not saved_videos_dir:
+        saved_videos_path = os.getenv("SAVED_VIDEOS_DIR", "/data/saved_videos")
+        saved_videos_dir = Path(saved_videos_path)
+
+    try:
+        target_dir = saved_videos_dir.expanduser().resolve()
+        if not target_dir.exists():
+            return
+
+        video_extensions = {".mp4", ".mkv", ".webm", ".avi", ".mov"}
+        total_count = 0
+        total_bytes = 0
+        latest_file = None
+        latest_mtime = 0.0
+
+        for path in target_dir.rglob("*"):
+            if path.is_file() and path.suffix.lower() in video_extensions:
+                try:
+                    stat = path.stat()
+                    size = stat.st_size
+                    if size > 0:
+                        total_count += 1
+                        total_bytes += size
+                        mtime = stat.st_mtime
+                        if mtime > latest_mtime:
+                            latest_mtime = mtime
+                            latest_file = path
+                except Exception:
+                    continue
+
+        STORAGE_SAVED_VIDEOS_COUNT.set(total_count)
+        STORAGE_SAVED_VIDEOS_BYTES.set(total_bytes)
+
+        # Bootstrap last download state if starting clean or rebooted
+        if latest_file and (LAST_DOWNLOAD_TIMESTAMP_SECONDS._value.get() == 0 or LAST_DOWNLOAD_SUCCESS._value.get() == -1):
+            LAST_DOWNLOAD_TIMESTAMP_SECONDS.set(latest_mtime)
+            LAST_DOWNLOAD_SIZE_BYTES.set(latest_file.stat().st_size)
+            LAST_DOWNLOAD_SUCCESS.set(1)
+
+            plat = "other"
+            p_str = str(latest_file).lower()
+            for kp in KNOWN_PLATFORMS:
+                if kp in p_str:
+                    plat = kp
+                    break
+            LAST_DOWNLOAD_PLATFORM.info({
+                "platform": plat,
+                "action": "save",
+                "status": "success",
+            })
+    except Exception as e:
+        logger.debug(f"Failed to scan storage metrics: {e}")
+
+
 def record_transcode_start() -> None:
     """Track beginning of a transcode job."""
     try:
@@ -348,6 +540,12 @@ def start_metrics_server(port: int = 9099, host: str = "0.0.0.0") -> bool:
             "version": "1.0.0",
             "service": "multimedia-downloader-bot",
         })
+
+        init_metrics_registry()
+        try:
+            update_storage_metrics()
+        except Exception:
+            pass
 
         start_http_server(port=port, addr=host)
         _metrics_server_started = True

@@ -561,6 +561,7 @@ async def download_series(
     series_info: dict,
     output_dir: Path,
     progress_callback: Callable[[dict], Awaitable[None]] | None = None,
+    episode_done_callback: Callable[[int, bool, float, int, str], None] | None = None,
 ) -> tuple[int, int, list[Path]]:
     """
     Downloads all episodes of a series into output_dir/<safe_slug>/.
@@ -629,6 +630,7 @@ async def download_series(
             except Exception:
                 pass
 
+        t_ep_start = time.time()
         try:
             if progress_callback:
                 try:
@@ -682,15 +684,30 @@ async def download_series(
 
             await asyncio.to_thread(_run_ytdlp_download, stream_url, outtmpl, headers, ep_hook)
 
+            ep_path = None
             if target_path.exists() and target_path.stat().st_size > 0:
-                successful_count += 1
-                downloaded_paths.append(target_path)
+                ep_path = target_path
             else:
                 candidates = [p for p in Path(safe_dir).glob(f"{custom_title}.*") if p.is_file() and p.stat().st_size > 0]
                 if candidates:
-                    latest = max(candidates, key=lambda x: x.stat().st_mtime)
-                    successful_count += 1
-                    downloaded_paths.append(latest)
+                    ep_path = max(candidates, key=lambda x: x.stat().st_mtime)
+
+            if ep_path:
+                successful_count += 1
+                downloaded_paths.append(ep_path)
+                ep_duration = time.time() - t_ep_start
+                ep_size = ep_path.stat().st_size
+                if episode_done_callback:
+                    try:
+                        episode_done_callback(ep, True, ep_duration, ep_size, "")
+                    except Exception:
+                        pass
+            else:
+                if episode_done_callback:
+                    try:
+                        episode_done_callback(ep, False, time.time() - t_ep_start, 0, "Archivo no encontrado tras descarga")
+                    except Exception:
+                        pass
 
             if progress_callback:
                 try:
@@ -705,6 +722,11 @@ async def download_series(
                     pass
         except Exception as e:
             logger.error(f"Error descargando capítulo {ep} de {slug}: {e}")
+            if episode_done_callback:
+                try:
+                    episode_done_callback(ep, False, time.time() - t_ep_start, 0, str(e))
+                except Exception:
+                    pass
 
     return successful_count, total, downloaded_paths
 

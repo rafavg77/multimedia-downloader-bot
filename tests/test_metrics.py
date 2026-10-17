@@ -14,6 +14,11 @@ from metrics import (
     record_unauthorized_attempt,
     record_download_start,
     record_download_result,
+    record_episode_download,
+    record_series_start,
+    record_series_result,
+    init_metrics_registry,
+    update_storage_metrics,
     record_transcode_start,
     record_transcode_result,
     record_telegram_upload,
@@ -24,6 +29,8 @@ from metrics import (
     LAST_DOWNLOAD_SUCCESS,
     LAST_DOWNLOAD_DURATION_SECONDS,
     LAST_DOWNLOAD_SIZE_BYTES,
+    STORAGE_SAVED_VIDEOS_COUNT,
+    STORAGE_SAVED_VIDEOS_BYTES,
     BOT_AUTHORIZED_USERS,
 )
 
@@ -63,6 +70,11 @@ class TestPlatformDetection:
     def test_dramatip_urls(self):
         assert detect_platform("https://dramatip.net/es/series/mi-hermana-creyo-haber-ganado-hasta-que-nacio-mi-heredero-dorado") == "dramatip"
         assert detect_platform("https://dramatip.net/es/series/mi-hermana-creyo-haber-ganado-hasta-que-nacio-mi-heredero-dorado/episode-2") == "dramatip"
+        assert detect_platform("https://www.dramatip.com/watch/123") == "dramatip"
+
+    def test_dramabox_urls(self):
+        assert detect_platform("https://www.dramaboxdb.com/es/movie/41000120981/el-dolor-despu%C3%A9s-del-adi%C3%B3s-doblado") == "dramabox"
+        assert detect_platform("https://dramabox.com/es/movie/123") == "dramabox"
 
     def test_unknown_and_invalid(self):
         assert detect_platform("https://example.com/video.mp4") == "other"
@@ -143,3 +155,45 @@ class TestMetricsRecording:
         metrics_text = generate_latest(REGISTRY).decode("utf-8")
         assert "mediabot_authorized_users_total 5.0" in metrics_text
         assert "mediabot_uptime_seconds" in metrics_text
+
+    def test_series_and_episode_metrics(self):
+        record_series_start("dramabox")
+        assert ACTIVE_DOWNLOADS._value.get() >= 1
+
+        record_episode_download(
+            platform="dramabox",
+            success=True,
+            duration=1.5,
+            size_bytes=5242880,
+        )
+        assert LAST_DOWNLOAD_SUCCESS._value.get() == 1
+        assert LAST_DOWNLOAD_SIZE_BYTES._value.get() == 5242880
+
+        record_series_result(
+            platform="dramabox",
+            success=True,
+            total_episodes=10,
+            successful_episodes=10,
+            duration=15.0,
+        )
+
+        metrics_text = generate_latest(REGISTRY).decode("utf-8")
+        assert 'mediabot_series_downloads_total{platform="dramabox",status="success"}' in metrics_text
+        assert 'mediabot_series_episodes_total{platform="dramabox",status="success"}' in metrics_text
+
+    def test_init_metrics_registry(self):
+        init_metrics_registry()
+        metrics_text = generate_latest(REGISTRY).decode("utf-8")
+        assert 'mediabot_downloads_total{action="save",platform="youtube",status="success"}' in metrics_text
+        assert 'mediabot_downloads_total{action="save",platform="dramabox",status="success"}' in metrics_text
+        assert 'mediabot_series_downloads_total{platform="dramatip",status="success"}' in metrics_text
+
+    def test_storage_metrics_scan(self, tmp_path):
+        vid = tmp_path / "Season 01" / "test - S01E01.mp4"
+        vid.parent.mkdir(parents=True)
+        vid.write_bytes(b"0" * 1024)
+
+        update_storage_metrics(tmp_path)
+        assert STORAGE_SAVED_VIDEOS_COUNT._value.get() >= 1
+        assert STORAGE_SAVED_VIDEOS_BYTES._value.get() >= 1024
+

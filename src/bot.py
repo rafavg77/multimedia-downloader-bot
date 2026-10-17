@@ -33,8 +33,9 @@ from downloader import (
 from metrics import (
     start_metrics_server, update_uptime, detect_platform,
     record_request, record_unauthorized_attempt, record_download_start,
-    record_download_result, record_transcode_start, record_transcode_result,
-    record_telegram_upload, set_authorized_users_count,
+    record_download_result, record_episode_download, record_series_start,
+    record_series_result, update_storage_metrics, record_transcode_start,
+    record_transcode_result, record_telegram_upload, set_authorized_users_count,
 )
 
 # Load environment variables
@@ -805,22 +806,32 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                     except Exception:
                         pass
 
+            def on_episode_done(ep: int, success: bool, duration: float, size_bytes: int, error_msg: str) -> None:
+                record_episode_download(
+                    platform=platform,
+                    success=success,
+                    duration=duration,
+                    size_bytes=size_bytes,
+                    error_msg=error_msg,
+                )
+
             successful, total_count, paths = await download_series(
                 series_info,
                 output_dir,
                 progress_callback=series_progress_callback,
+                episode_done_callback=on_episode_done,
             )
             download_duration = time.time() - t_download_start
-            total_size = sum(p.stat().st_size for p in paths if p.exists())
 
-            record_download_result(
+            record_series_result(
                 platform=platform,
-                action=action,
                 success=(successful > 0),
+                total_episodes=total_count,
+                successful_episodes=successful,
                 duration=download_duration,
-                size_bytes=total_size,
             )
             download_recorded = True
+            update_storage_metrics(output_dir)
 
             text = (
                 f"✅ *¡Descarga de serie completada!*\n\n"
@@ -1111,6 +1122,10 @@ async def main() -> None:
     metrics_port = int(os.getenv("METRICS_PORT", "9099"))
     metrics_host = os.getenv("METRICS_HOST", "0.0.0.0")
     start_metrics_server(port=metrics_port, host=metrics_host)
+    try:
+        update_storage_metrics(SAVED_VIDEOS_DIR)
+    except Exception as exc:
+        logger.debug("Initial storage scan failed: %s", exc)
         
     # Initialize Application
     application = Application.builder().token(TOKEN).build()
@@ -1130,11 +1145,15 @@ async def main() -> None:
         await sync_bot_commands(application)
         await application.start()
 
-        # Background task for uptime metric
+        # Background task for uptime and storage metrics
         async def _uptime_loop():
+            loop_count = 0
             while True:
                 try:
                     update_uptime()
+                    loop_count += 1
+                    if loop_count % 4 == 0:  # Every ~60 seconds
+                        update_storage_metrics(SAVED_VIDEOS_DIR)
                 except Exception:
                     pass
                 await asyncio.sleep(15)
