@@ -157,6 +157,16 @@ async def transcode_to_telegram_mp4(input_path: Path) -> Tuple[bool, str, Path]:
         logger.error(f"Error transcoding video: {e}")
         return False, f"transcode error: {e}", input_path
 
+def extract_first_url(text: str | None) -> str | None:
+    """Extracts the first HTTP/HTTPS URL from a string, handling accents and surrounding text."""
+    if not text:
+        return None
+    m = re.search(r"https?://[^\s<>\"'`]+", text, re.IGNORECASE)
+    if m:
+        return m.group(0).rstrip(".,;!?:)]}\"'")
+    return None
+
+
 def validate_url(url: str) -> bool:
     """Validate URL to ensure it's from a trusted domain."""
     trusted_base_domains = {

@@ -23,6 +23,7 @@ from db_manager import (
 from downloader import (
     download_video,
     download_series,
+    extract_first_url,
     get_dramatip_series_info,
     get_dramabox_series_info,
     ensure_directories,
@@ -482,17 +483,34 @@ async def handle_admin_add_text(update: Update, context: ContextTypes.DEFAULT_TY
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if await handle_admin_add_text(update, context):
         return
+
+    text = (update.message.text or "").strip() if update.message else ""
+    url = extract_first_url(text)
+    if url:
+        await handle_url(update, context, extracted_url=url)
+        return
+
+    logger.info(
+        "non_url_text_received chat_id=%s text=%s",
+        update.effective_chat.id if update.effective_chat else None,
+        text[:60],
+    )
     await update.message.reply_text("Envíame un enlace de video válido o usa /start para ver el menú.")
 
 
-async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE, extracted_url: str | None = None) -> None:
     """Handle incoming URLs and show action options."""
     if not await is_user_authorized(update.effective_chat.id):
         await handle_unauthorized_user(update)
         return
 
+    raw_text = (update.message.text or "").strip() if update.message else ""
+    url = extracted_url or extract_first_url(raw_text) or raw_text
+    if not url or not url.startswith(("http://", "https://")):
+        await update.message.reply_text("Envíame un enlace de video válido o usa /start para ver el menú.")
+        return
+
     record_request("url", "authorized")
-    url = update.message.text
     chat_id = update.effective_chat.id
     username = update.effective_user.username if update.effective_user else None
     logger.info(
@@ -554,11 +572,18 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
     reply_markup = InlineKeyboardMarkup(keyboard)
     
-    await update.message.reply_text(
-        prompt_text,
-        reply_markup=reply_markup,
-        parse_mode="Markdown" if series_info else None
-    )
+    try:
+        await update.message.reply_text(
+            prompt_text,
+            reply_markup=reply_markup,
+            parse_mode="Markdown" if series_info else None
+        )
+    except BadRequest as exc:
+        logger.warning("Markdown parse failed for prompt_text (%s), falling back to plain text", exc)
+        await update.message.reply_text(
+            prompt_text.replace("*", "").replace("_", ""),
+            reply_markup=reply_markup,
+        )
 
 async def _send_users_list(query) -> None:
     users = await list_authorized_users()
@@ -1095,12 +1120,6 @@ async def main() -> None:
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("events", events_command))
-    application.add_handler(
-        MessageHandler(
-            filters.TEXT & ~filters.COMMAND & filters.Entity("url"),
-            handle_url
-        )
-    )
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     application.add_handler(CallbackQueryHandler(button_callback))
 

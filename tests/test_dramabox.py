@@ -10,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 import downloader
 from downloader import (
     validate_url,
+    extract_first_url,
     get_dramabox_series_info,
     _resolve_dramabox_stream,
     _resolve_dramabox_episode_stream,
@@ -94,6 +95,13 @@ class TestDramaBoxExtraction:
     def test_detect_platform(self):
         assert detect_platform("https://www.dramaboxdb.com/es/movie/41000120981/el-dolor-despu%C3%A9s-del-adi%C3%B3s-doblado") == "dramabox"
         assert detect_platform("https://www.dramaboxdb.com/es/ep/41000120981_el-dolor-despu%C3%A9s-del-adi%C3%B3s-doblado/600126901_Episode-1") == "dramabox"
+
+    def test_extract_first_url(self):
+        raw_accented = "https://www.dramaboxdb.com/es/movie/41000120981/el-dolor-después-del-adiós-doblado"
+        assert extract_first_url(raw_accented) == raw_accented
+        assert extract_first_url(f"Mira este drama: {raw_accented}!") == raw_accented
+        assert extract_first_url("Texto sin ninguna url") is None
+        assert extract_first_url("") is None
 
     def test_path_regex(self):
         m1 = DRAMABOX_PATH_RE.match("/es/movie/41000120981/el-dolor-despu%C3%A9s-del-adi%C3%B3s-doblado")
