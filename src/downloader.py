@@ -415,7 +415,7 @@ def get_dramabox_series_info(url: str) -> dict | None:
         logger.warning(f"Error obteniendo página de serie DramaBox: {e}")
         return None
 
-    m = re.search(r'<script id="__NEXT_DATA__\" type=\"application/json\">(.*?)</script>', html)
+    m = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', html, re.DOTALL)
     if not m:
         return None
 
@@ -472,6 +472,7 @@ def _resolve_dramabox_episode_stream(
     lang: str,
     episode: int,
     chapters: dict | None = None,
+    ch_id: str | None = None,
 ) -> tuple[str, dict[str, str], str]:
     ch = (chapters or {}).get(episode)
     stream_url = None
@@ -479,7 +480,8 @@ def _resolve_dramabox_episode_stream(
         stream_url = ch.get("mp4") or ch.get("m3u8")
 
     if not stream_url:
-        ch_id = ch.get("id") if ch else None
+        if not ch_id and ch:
+            ch_id = ch.get("id")
         if not ch_id:
             info = get_dramabox_series_info(f"https://{netloc}/{lang}/movie/{book_id}/{raw_slug}")
             if info and info.get("chapters", {}).get(episode):
@@ -490,7 +492,7 @@ def _resolve_dramabox_episode_stream(
             ep_url = f"https://{netloc}/{lang}/ep/{book_id}_{raw_slug}/{ch_id}_Episode-{episode}"
             try:
                 ep_html = _fetch_text(ep_url, referer=f"https://{netloc}/{lang}/movie/{book_id}/{raw_slug}")
-                m = re.search(r'<script id="__NEXT_DATA__\" type=\"application/json\">(.*?)</script>', ep_html)
+                m = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', ep_html, re.DOTALL)
                 if m:
                     props = json.loads(m.group(1)).get("props", {}).get("pageProps", {})
                     stream_url = props.get("freeSource")
@@ -531,6 +533,7 @@ def _resolve_dramabox_stream(url: str) -> tuple[str, dict[str, str], str]:
         lang=lang,
         episode=episode,
         chapters=chapters,
+        ch_id=ch_id,
     )
 
 
