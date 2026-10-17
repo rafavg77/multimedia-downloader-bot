@@ -387,13 +387,9 @@ async def download_series(
     progress_callback: Callable[[dict], Awaitable[None]] | None = None,
 ) -> tuple[int, int, list[Path]]:
     """
-    Downloads all episodes of a series into output_dir.
+    Downloads all episodes of a series into output_dir/<safe_slug>/.
     Returns: (successful_count: int, total_count: int, downloaded_paths: list[Path])
     """
-    if not ensure_directories(output_dir):
-        raise ValueError(f"Error: No se puede acceder al directorio {output_dir}")
-
-    safe_dir = str(output_dir.expanduser().resolve())
     netloc = series_info.get("netloc", "dramatip.net")
     book_id = series_info.get("book_id")
     slug = series_info.get("slug", "series")
@@ -402,13 +398,18 @@ async def download_series(
     total = len(episodes)
     safe_slug = re.sub(r"[^a-zA-Z0-9_-]", "_", slug)
 
+    series_dir = output_dir.expanduser().resolve() / safe_slug
+    if not ensure_directories(series_dir):
+        raise ValueError(f"Error: No se puede acceder al directorio {series_dir}")
+
+    safe_dir = str(series_dir)
     successful_count = 0
     downloaded_paths: list[Path] = []
     loop = asyncio.get_running_loop()
 
     for ep in episodes:
         target_name = f"{safe_slug}-capitulo-{ep}.mp4"
-        target_path = Path(safe_dir) / target_name
+        target_path = series_dir / target_name
 
         if target_path.exists() and target_path.stat().st_size >= MIN_VALID_EPISODE_BYTES:
             logger.info(f"Capítulo {ep} ya existe ({target_path.stat().st_size} bytes), omitiendo descarga.")

@@ -101,3 +101,26 @@ class TestDramaTipExtraction:
             assert resp.status == 200
             assert "#EXTM3U" in resp.read().decode("utf-8")
 
+    def test_download_series_creates_subfolder(self, tmp_path):
+        import asyncio
+        from downloader import download_series, MIN_VALID_EPISODE_BYTES
+        slug = "serie-prueba-subfolder"
+        series_dir = tmp_path / slug
+        series_dir.mkdir(parents=True)
+        existing_ep = series_dir / f"{slug}-capitulo-1.mp4"
+        existing_ep.write_bytes(b"0" * MIN_VALID_EPISODE_BYTES)
+
+        series_info = {
+            "netloc": "dramatip.net",
+            "book_id": "99999",
+            "slug": slug,
+            "lang": "es",
+            "episodes": [1],
+        }
+        successful, total, paths = asyncio.run(download_series(series_info, tmp_path))
+        assert successful == 1
+        assert total == 1
+        assert paths == [existing_ep]
+        assert paths[0].parent == tmp_path / slug
+
+

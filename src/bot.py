@@ -711,6 +711,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
             total_eps = series_info.get("total_episodes", len(series_info.get("episodes", [])))
             series_title = series_info.get("title", "Serie")
+            raw_slug = series_info.get("slug", "series")
+            series_folder = "".join(c if (c.isalnum() or c in "-_") else "_" for c in raw_slug)
             output_dir = SAVED_VIDEOS_DIR
 
             await message.edit_text(
@@ -748,7 +750,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                         f"📺 *Descargando serie:* {series_title}\n\n"
                         f"📦 *Capítulo {ep}/{total}*: [{bar}] {pct}%\n"
                         f"✅ *Guardados hasta ahora:* {completed}/{total}\n"
-                        f"📁 *Destino:* `/data/saved_videos/`"
+                        f"📁 *Destino:* `/data/saved_videos/{series_folder}/`"
                     )
                     try:
                         await message.edit_text(text, parse_mode="Markdown")
@@ -784,7 +786,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 f"✅ *¡Descarga de serie completada!*\n\n"
                 f"📺 *Serie:* {series_title}\n"
                 f"📦 *Capítulos guardados:* {successful}/{total_count}\n"
-                f"💾 *Ubicación:* Carpeta de videos guardados del servidor (`/data/saved_videos/`)"
+                f"💾 *Ubicación:* `/data/saved_videos/{series_folder}/`"
             )
             await message.edit_text(text, parse_mode="Markdown")
             return
