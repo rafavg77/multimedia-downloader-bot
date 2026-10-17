@@ -24,6 +24,7 @@ from downloader import (
     download_video,
     download_series,
     get_dramatip_series_info,
+    get_dramabox_series_info,
     ensure_directories,
     probe_video_metadata,
     transcode_to_telegram_mp4,
@@ -505,11 +506,17 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     context.user_data['current_url'] = url
     
     series_info = None
-    if detect_platform(url) == "dramatip":
+    platform = detect_platform(url)
+    if platform == "dramatip":
         try:
             series_info = await asyncio.to_thread(get_dramatip_series_info, url)
         except Exception as e:
             logger.warning(f"Error detectando serie de DramaTip: {e}")
+    elif platform == "dramabox":
+        try:
+            series_info = await asyncio.to_thread(get_dramabox_series_info, url)
+        except Exception as e:
+            logger.warning(f"Error detectando serie de DramaBox: {e}")
 
     keyboard = [
         [
@@ -527,9 +534,14 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         keyboard.append([
             InlineKeyboardButton(f"📦 Descargar todos los episodios ({total}) y guardar", callback_data="save_all")
         ])
+        extra_note = ""
+        if series_info.get("platform") == "dramabox":
+            unlocked = series_info.get("unlocked_count", 0)
+            if unlocked < total:
+                extra_note = f"\nℹ️ _Capítulos 1-{unlocked} completos (720p). Del {unlocked+1}-{total} DramaBox incluye previsualizaciones (15s)._\n"
         prompt_text = (
             f"📺 *Serie detectada:* {series_info['title']}\n"
-            f"📑 *Episodios disponibles:* {total}\n\n"
+            f"📑 *Episodios disponibles:* {total}{extra_note}\n\n"
             f"¿Qué quieres hacer con este contenido?"
         )
     else:
@@ -702,8 +714,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     try:
         if query.data == "save_all":
             series_info = context.user_data.get('series_info')
-            if not series_info and platform == "dramatip":
-                series_info = await asyncio.to_thread(get_dramatip_series_info, url)
+            if not series_info:
+                if platform == "dramatip":
+                    series_info = await asyncio.to_thread(get_dramatip_series_info, url)
+                elif platform == "dramabox":
+                    series_info = await asyncio.to_thread(get_dramabox_series_info, url)
 
             if not series_info:
                 await message.edit_text("❌ No se pudo obtener la información de los episodios de la serie.")

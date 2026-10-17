@@ -6,9 +6,10 @@ import os
 import re
 import subprocess
 import tempfile
+import unicodedata
 from pathlib import Path
 from typing import Awaitable, Callable, Tuple
-from urllib.parse import urljoin, urlparse, urlunparse
+from urllib.parse import unquote, urljoin, urlparse, urlunparse
 from urllib.request import Request, urlopen
 
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
@@ -54,7 +55,11 @@ DRAMATIP_PATH_RE = re.compile(
     r"^/(?:([a-z]{2}(?:-[a-zA-Z]{2})?)/)?series/([^/]+)(?:/episode-(\d+))?/?$",
     re.IGNORECASE,
 )
-MIN_VALID_EPISODE_BYTES = 1_500_000
+DRAMABOX_PATH_RE = re.compile(
+    r"^/(?:([a-z]{2}(?:-[a-zA-Z]{2})?)/)?(?:movie/(\d+)(?:/([^/?#]+))?|ep/(\d+)(?:_([^/?#]+))?/(\d+)_Episode-(\d+))/?$",
+    re.IGNORECASE,
+)
+MIN_VALID_EPISODE_BYTES = 500_000
 
 async def probe_video_metadata(input_path: Path) -> dict[str, int]:
     """Return width/height/duration metadata for Telegram uploads."""
@@ -165,6 +170,7 @@ def validate_url(url: str) -> bool:
         'dailymotion.com',
         'flixgaze.com',
         'dramatip.net',
+        'dramaboxdb.com',
     }
     trusted_exact_hosts = {
         'youtu.be',
@@ -381,6 +387,153 @@ def _resolve_dramatip_stream(url: str) -> tuple[str, dict[str, str], str]:
         return stream_url, headers, custom_title
 
 
+def _normalize_slug(slug: str) -> str:
+    unquoted = unquote(slug)
+    normalized = unicodedata.normalize("NFKD", unquoted).encode("ascii", "ignore").decode("ascii")
+    safe = re.sub(r"[^a-zA-Z0-9_-]", "_", normalized).strip("_")
+    return safe or "series"
+
+
+def get_dramabox_series_info(url: str) -> dict | None:
+    """Extracts series metadata, bookId, and list of all available episodes from a DramaBox URL."""
+    parsed = urlparse(url)
+    match = DRAMABOX_PATH_RE.match(parsed.path)
+    if not match:
+        return None
+
+    lang_match, m_book_id, m_slug, ep_book_id, ep_slug, ch_id, ep_num = match.groups()
+    lang = lang_match or "es"
+    book_id = m_book_id or ep_book_id
+    raw_slug = m_slug or ep_slug or "series"
+    slug = _normalize_slug(raw_slug)
+    netloc = (parsed.netloc or "dramaboxdb.com").lower()
+
+    movie_url = f"https://{netloc}/{lang}/movie/{book_id}/{raw_slug}" if raw_slug else f"https://{netloc}/{lang}/movie/{book_id}"
+    try:
+        html = _fetch_text(movie_url, referer=f"https://{netloc}/")
+    except Exception as e:
+        logger.warning(f"Error obteniendo página de serie DramaBox: {e}")
+        return None
+
+    m = re.search(r'<script id="__NEXT_DATA__\" type=\"application/json\">(.*?)</script>', html)
+    if not m:
+        return None
+
+    try:
+        data = json.loads(m.group(1))
+        props = data.get("props", {}).get("pageProps", {})
+        book_info = props.get("bookInfo", {})
+        chapter_list = props.get("chapterList", [])
+    except Exception as e:
+        logger.warning(f"Error parseando datos __NEXT_DATA__ de DramaBox: {e}")
+        return None
+
+    book_name = book_info.get("bookName") or slug.replace("-", " ").title()
+    chapters: dict[int, dict] = {}
+    episodes: list[int] = []
+    unlocked_count = 0
+    for idx, ch in enumerate(chapter_list):
+        ep_no = ch.get("index", idx) + 1
+        episodes.append(ep_no)
+        is_unlock = bool(ch.get("unlock"))
+        if is_unlock:
+            unlocked_count += 1
+        chapters[ep_no] = {
+            "id": str(ch.get("id")),
+            "name": ch.get("name"),
+            "unlock": is_unlock,
+            "mp4": ch.get("mp4"),
+            "m3u8": ch.get("m3u8Url"),
+            "duration": ch.get("duration"),
+        }
+
+    return {
+        "platform": "dramabox",
+        "book_id": book_id,
+        "slug": slug,
+        "raw_slug": raw_slug,
+        "lang": lang,
+        "title": book_name,
+        "episodes": sorted(episodes),
+        "total_episodes": len(episodes),
+        "unlocked_count": unlocked_count,
+        "chapters": chapters,
+        "series_url": movie_url,
+        "current_episode": int(ep_num) if ep_num else None,
+        "netloc": netloc,
+    }
+
+
+def _resolve_dramabox_episode_stream(
+    netloc: str,
+    book_id: str,
+    slug: str,
+    raw_slug: str,
+    lang: str,
+    episode: int,
+    chapters: dict | None = None,
+) -> tuple[str, dict[str, str], str]:
+    ch = (chapters or {}).get(episode)
+    stream_url = None
+    if ch:
+        stream_url = ch.get("mp4") or ch.get("m3u8")
+
+    if not stream_url:
+        ch_id = ch.get("id") if ch else None
+        if not ch_id:
+            info = get_dramabox_series_info(f"https://{netloc}/{lang}/movie/{book_id}/{raw_slug}")
+            if info and info.get("chapters", {}).get(episode):
+                ch = info["chapters"][episode]
+                stream_url = ch.get("mp4") or ch.get("m3u8")
+                ch_id = ch.get("id")
+        if not stream_url and ch_id:
+            ep_url = f"https://{netloc}/{lang}/ep/{book_id}_{raw_slug}/{ch_id}_Episode-{episode}"
+            try:
+                ep_html = _fetch_text(ep_url, referer=f"https://{netloc}/{lang}/movie/{book_id}/{raw_slug}")
+                m = re.search(r'<script id="__NEXT_DATA__\" type=\"application/json\">(.*?)</script>', ep_html)
+                if m:
+                    props = json.loads(m.group(1)).get("props", {}).get("pageProps", {})
+                    stream_url = props.get("freeSource")
+            except Exception as e:
+                logger.warning(f"Error consultando preview de capítulo {episode} en DramaBox: {e}")
+
+    if not stream_url:
+        raise ValueError(f"No se pudo obtener el enlace de reproducción para el capítulo {episode} en DramaBox.")
+
+    custom_title = f"{slug}-capitulo-{episode}"
+    headers = {"User-Agent": DEFAULT_USER_AGENT}
+    return stream_url, headers, custom_title
+
+
+def _resolve_dramabox_stream(url: str) -> tuple[str, dict[str, str], str]:
+    parsed = urlparse(url)
+    match = DRAMABOX_PATH_RE.match(parsed.path)
+    if not match:
+        raise ValueError(
+            "URL de DramaBox no válida. Formato esperado: https://www.dramaboxdb.com/es/movie/<id>/<slug> o .../ep/<id>_<slug>/<ch_id>_Episode-<num>"
+        )
+
+    lang_match, m_book_id, m_slug, ep_book_id, ep_slug, ch_id, ep_num = match.groups()
+    lang = lang_match or "es"
+    book_id = m_book_id or ep_book_id
+    raw_slug = m_slug or ep_slug or "series"
+    slug = _normalize_slug(raw_slug)
+    netloc = (parsed.netloc or "dramaboxdb.com").lower()
+    episode = int(ep_num) if ep_num else 1
+
+    info = get_dramabox_series_info(f"https://{netloc}/{lang}/movie/{book_id}/{raw_slug}")
+    chapters = info.get("chapters", {}) if info else {}
+    return _resolve_dramabox_episode_stream(
+        netloc=netloc,
+        book_id=book_id,
+        slug=slug,
+        raw_slug=raw_slug,
+        lang=lang,
+        episode=episode,
+        chapters=chapters,
+    )
+
+
 async def download_series(
     series_info: dict,
     output_dir: Path,
@@ -390,11 +543,14 @@ async def download_series(
     Downloads all episodes of a series into output_dir/<safe_slug>/.
     Returns: (successful_count: int, total_count: int, downloaded_paths: list[Path])
     """
-    netloc = series_info.get("netloc", "dramatip.net")
+    platform = series_info.get("platform", "dramatip")
+    netloc = series_info.get("netloc", "dramatip.net" if platform == "dramatip" else "dramaboxdb.com")
     book_id = series_info.get("book_id")
     slug = series_info.get("slug", "series")
+    raw_slug = series_info.get("raw_slug", slug)
     lang = series_info.get("lang", "es")
     episodes = series_info.get("episodes", [])
+    chapters = series_info.get("chapters", {})
     total = len(episodes)
     safe_slug = re.sub(r"[^a-zA-Z0-9_-]", "_", slug)
 
@@ -450,13 +606,24 @@ async def download_series(
                 except Exception:
                     pass
 
-            stream_url, headers, custom_title = _resolve_dramatip_episode_stream(
-                netloc=netloc,
-                book_id=book_id,
-                slug=slug,
-                lang=lang,
-                episode=ep,
-            )
+            if platform == "dramabox":
+                stream_url, headers, custom_title = _resolve_dramabox_episode_stream(
+                    netloc=netloc,
+                    book_id=book_id,
+                    slug=safe_slug,
+                    raw_slug=raw_slug,
+                    lang=lang,
+                    episode=ep,
+                    chapters=chapters,
+                )
+            else:
+                stream_url, headers, custom_title = _resolve_dramatip_episode_stream(
+                    netloc=netloc,
+                    book_id=book_id,
+                    slug=slug,
+                    lang=lang,
+                    episode=ep,
+                )
             outtmpl = f"{safe_dir}/{custom_title}.%(ext)s"
 
             def ep_hook(info: dict) -> None:
@@ -513,6 +680,8 @@ def _prepare_download_target(url: str) -> tuple[str, dict[str, str], str | None]
         return stream_url, headers, None
     if host == "dramatip.net" or host.endswith(".dramatip.net"):
         return _resolve_dramatip_stream(url)
+    if host == "dramaboxdb.com" or host.endswith(".dramaboxdb.com"):
+        return _resolve_dramabox_stream(url)
     return url, {}, None
 
 
@@ -755,7 +924,7 @@ def _run_ytdlp_download(url: str, outtmpl: str, headers: dict[str, str], progres
         "merge_output_format": "mp4",
         "cachedir": False,
         "noprogress": True,
-        "progress_hooks": [progress_hook],
+        "progress_hooks": [progress_hook] if progress_hook else [],
         "http_headers": headers or {},
         "quiet": True,
         "no_warnings": True,
