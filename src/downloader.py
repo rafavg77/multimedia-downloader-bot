@@ -4,11 +4,14 @@ import json
 import logging
 import os
 import re
+import subprocess
+import tempfile
 from pathlib import Path
 from typing import Awaitable, Callable, Tuple
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse, urlunparse
 from urllib.request import Request, urlopen
 
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 import yt_dlp
@@ -45,10 +48,13 @@ FLIXGAZE_PLAYER_RE = re.compile(
     re.IGNORECASE,
 )
 DRAMATIP_KEY = base64.b64decode("QC6Ir2trghxRAyyyWZEOEFR4GgLhnfQ4A19I3QBlQkc=")
+GOODSHORT_OFFLINE_KEY = bytes.fromhex("0b89258a7355bd7b0dc6e53a8b728b39")
+_cached_goodshort_key: bytes | None = None
 DRAMATIP_PATH_RE = re.compile(
     r"^/(?:([a-z]{2}(?:-[a-zA-Z]{2})?)/)?series/([^/]+)(?:/episode-(\d+))?/?$",
     re.IGNORECASE,
 )
+MIN_VALID_EPISODE_BYTES = 1_500_000
 
 async def probe_video_metadata(input_path: Path) -> dict[str, int]:
     """Return width/height/duration metadata for Telegram uploads."""
@@ -404,7 +410,7 @@ async def download_series(
         target_name = f"{safe_slug}-capitulo-{ep}.mp4"
         target_path = Path(safe_dir) / target_name
 
-        if target_path.exists() and target_path.stat().st_size > 0:
+        if target_path.exists() and target_path.stat().st_size >= MIN_VALID_EPISODE_BYTES:
             logger.info(f"Capítulo {ep} ya existe ({target_path.stat().st_size} bytes), omitiendo descarga.")
             successful_count += 1
             downloaded_paths.append(target_path)
@@ -421,7 +427,28 @@ async def download_series(
                     pass
             continue
 
+        if target_path.exists():
+            logger.warning(
+                f"Capítulo {ep} existente parece truncado ({target_path.stat().st_size} bytes < {MIN_VALID_EPISODE_BYTES}), re-descargando."
+            )
+            try:
+                target_path.unlink()
+            except Exception:
+                pass
+
         try:
+            if progress_callback:
+                try:
+                    await progress_callback({
+                        "episode": ep,
+                        "total_episodes": total,
+                        "percent": 0,
+                        "completed_count": successful_count,
+                        "status": "downloading",
+                    })
+                except Exception:
+                    pass
+
             stream_url, headers, custom_title = _resolve_dramatip_episode_stream(
                 netloc=netloc,
                 book_id=book_id,
@@ -460,6 +487,18 @@ async def download_series(
                     latest = max(candidates, key=lambda x: x.stat().st_mtime)
                     successful_count += 1
                     downloaded_paths.append(latest)
+
+            if progress_callback:
+                try:
+                    await progress_callback({
+                        "episode": ep,
+                        "total_episodes": total,
+                        "percent": 100,
+                        "completed_count": successful_count,
+                        "status": "finished",
+                    })
+                except Exception:
+                    pass
         except Exception as e:
             logger.error(f"Error descargando capítulo {ep} de {slug}: {e}")
 
@@ -560,7 +599,154 @@ def _parse_download_sections(value: str) -> list[tuple[float | None, float | Non
     return ranges
 
 
+def _get_goodshort_aes_key(netloc: str = "dramatip.net") -> bytes:
+    global _cached_goodshort_key
+    if _cached_goodshort_key is not None:
+        return _cached_goodshort_key
+    try:
+        req = Request(
+            f"https://{netloc}/api/goodshort-key",
+            headers={
+                "User-Agent": DEFAULT_USER_AGENT,
+                "Referer": f"https://{netloc}/",
+            },
+        )
+        with urlopen(req, timeout=10) as resp:
+            key = resp.read()
+            if len(key) == 16:
+                _cached_goodshort_key = key
+                return key
+    except Exception as e:
+        logger.warning(f"No se pudo obtener /api/goodshort-key, usando llave por defecto: {e}")
+    _cached_goodshort_key = GOODSHORT_OFFLINE_KEY
+    return _cached_goodshort_key
+
+
+def _download_goodshort_hls(url: str, outtmpl: str, headers: dict[str, str], progress_hook) -> bool:
+    """
+    Downloads and decrypts GoodReels / GoodShort HLS streams that use
+    #EXT-X-KEY:METHOD=AES-128,URI="local://offline-key/..." encryption.
+    Returns True if handled, False if caller should fall back to yt-dlp.
+    """
+    parsed = urlparse(url)
+    host = (parsed.netloc or "").lower()
+    if not (host.endswith(".goodreels.com") or host == "goodreels.com"):
+        return False
+
+    req_headers = {"User-Agent": (headers or {}).get("User-Agent", DEFAULT_USER_AGENT)}
+    m3u8_text = None
+    active_url = url
+    try:
+        with urlopen(Request(url, headers=req_headers), timeout=15) as resp:
+            m3u8_text = resp.read().decode("utf-8", errors="ignore")
+    except Exception:
+        if re.search(r"(^|\.)acfs\d*\.goodreels\.com$", host, re.IGNORECASE):
+            fallback_url = urlunparse(parsed._replace(netloc="v2-akm.goodreels.com"))
+            with urlopen(Request(fallback_url, headers=req_headers), timeout=15) as resp:
+                m3u8_text = resp.read().decode("utf-8", errors="ignore")
+                active_url = fallback_url
+        else:
+            raise
+
+    if not m3u8_text or "#EXT-X-STREAM-INF" in m3u8_text:
+        return False
+
+    segments: list[tuple[str, bool, bytes | None]] = []
+    encrypted = False
+    current_iv: bytes | None = None
+    needs_key = False
+
+    for raw_line in m3u8_text.splitlines():
+        line = raw_line.strip()
+        if line.startswith("#EXT-X-KEY:"):
+            if "METHOD=NONE" in line:
+                encrypted = False
+                current_iv = None
+            elif "METHOD=AES-128" in line:
+                encrypted = True
+                needs_key = True
+                iv_m = re.search(r"IV=0x([0-9a-fA-F]+)", line)
+                current_iv = bytes.fromhex(iv_m.group(1).zfill(32)) if iv_m else None
+        elif line and not line.startswith("#"):
+            seg_url = urljoin(active_url, line)
+            segments.append((seg_url, encrypted, current_iv))
+
+    if not segments:
+        return False
+
+    aes_key = _get_goodshort_aes_key() if needs_key else b""
+    target_mp4 = (
+        outtmpl.replace("%(ext)s", "mp4")
+        .replace("%(title).100B", "video")
+        .replace("%(title)s", "video")
+        .replace("%(id)s", "stream")
+    )
+    total_segs = len(segments)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        ts_path = os.path.join(tmp, "merged.ts")
+        with open(ts_path, "wb") as out_f:
+            for idx, (seg_url, is_enc, iv) in enumerate(segments):
+                with urlopen(Request(seg_url, headers=req_headers), timeout=20) as seg_resp:
+                    raw = seg_resp.read()
+                if is_enc:
+                    iv_bytes = iv if iv is not None else idx.to_bytes(16, "big")
+                    cipher = Cipher(algorithms.AES(aes_key), modes.CBC(iv_bytes))
+                    decryptor = cipher.decryptor()
+                    dec = decryptor.update(raw) + decryptor.finalize()
+                    if dec:
+                        pad_len = dec[-1]
+                        if 1 <= pad_len <= 16 and dec.endswith(bytes([pad_len]) * pad_len):
+                            dec = dec[:-pad_len]
+                    out_f.write(dec)
+                else:
+                    out_f.write(raw)
+
+                if progress_hook:
+                    try:
+                        progress_hook({
+                            "status": "downloading",
+                            "downloaded_bytes": idx + 1,
+                            "total_bytes": total_segs,
+                        })
+                    except Exception:
+                        pass
+
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-i",
+                ts_path,
+                "-c",
+                "copy",
+                "-bsf:a",
+                "aac_adtstoasc",
+                target_mp4,
+            ],
+            check=True,
+        )
+
+    if progress_hook:
+        try:
+            progress_hook({
+                "status": "finished",
+                "downloaded_bytes": total_segs,
+                "total_bytes": total_segs,
+            })
+        except Exception:
+            pass
+
+    return True
+
+
 def _run_ytdlp_download(url: str, outtmpl: str, headers: dict[str, str], progress_hook) -> None:
+    if _download_goodshort_hls(url, outtmpl, headers, progress_hook):
+        return
+
     ydl_opts = {
         "outtmpl": outtmpl,
         "restrictfilenames": True,

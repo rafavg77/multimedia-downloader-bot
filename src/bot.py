@@ -721,39 +721,47 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             last_update_time = [0.0]
             last_reported_ep = [-1]
             last_reported_pct = [-1]
+            edit_lock = asyncio.Lock()
 
             async def series_progress_callback(info: dict) -> None:
-                ep = info.get("episode", 1)
-                total = info.get("total_episodes", total_eps)
-                pct = info.get("percent", 0)
-                completed = info.get("completed_count", 0)
-                now = time.time()
-
-                is_ep_change = (ep != last_reported_ep[0])
-                is_pct_step = (pct - last_reported_pct[0] >= 20)
-                is_time_step = (now - last_update_time[0] >= 3.0)
-
-                if not (is_ep_change or (is_pct_step and is_time_step)):
+                if edit_lock.locked():
                     return
+                async with edit_lock:
+                    ep = info.get("episode", 1)
+                    total = info.get("total_episodes", total_eps)
+                    pct = info.get("percent", 0)
+                    completed = info.get("completed_count", 0)
+                    now = time.time()
 
-                last_update_time[0] = now
-                last_reported_ep[0] = ep
-                last_reported_pct[0] = pct
+                    is_ep_change = (ep != last_reported_ep[0])
+                    is_pct_step = (abs(pct - last_reported_pct[0]) >= 20 or pct in (0, 100))
+                    is_time_step = (now - last_update_time[0] >= 2.5)
 
-                bar_length = 10
-                filled = int(pct / 100 * bar_length)
-                bar = "█" * filled + "░" * (bar_length - filled)
+                    if not (is_time_step and (is_ep_change or is_pct_step)):
+                        return
 
-                text = (
-                    f"📺 *Descargando serie:* {series_title}\n\n"
-                    f"📦 *Capítulo {ep}/{total}*: [{bar}] {pct}%\n"
-                    f"✅ *Guardados hasta ahora:* {completed}/{total}\n"
-                    f"📁 *Destino:* `/data/saved_videos/`"
-                )
-                try:
-                    await message.edit_text(text, parse_mode="Markdown")
-                except Exception:
-                    pass
+                    bar_length = 10
+                    filled = int(pct / 100 * bar_length)
+                    bar = "█" * filled + "░" * (bar_length - filled)
+
+                    text = (
+                        f"📺 *Descargando serie:* {series_title}\n\n"
+                        f"📦 *Capítulo {ep}/{total}*: [{bar}] {pct}%\n"
+                        f"✅ *Guardados hasta ahora:* {completed}/{total}\n"
+                        f"📁 *Destino:* `/data/saved_videos/`"
+                    )
+                    try:
+                        await message.edit_text(text, parse_mode="Markdown")
+                        last_update_time[0] = time.time()
+                        last_reported_ep[0] = ep
+                        last_reported_pct[0] = pct
+                    except BadRequest as exc:
+                        if "Message is not modified" in str(exc):
+                            last_update_time[0] = time.time()
+                            last_reported_ep[0] = ep
+                            last_reported_pct[0] = pct
+                    except Exception:
+                        pass
 
             successful, total_count, paths = await download_series(
                 series_info,
