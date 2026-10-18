@@ -29,6 +29,8 @@ from downloader import (
     ensure_directories,
     probe_video_metadata,
     transcode_to_telegram_mp4,
+    get_platform_folder,
+    extract_series_slug,
 )
 from metrics import (
     start_metrics_server, update_uptime, detect_platform,
@@ -263,6 +265,12 @@ if not ensure_directories(DOWNLOAD_DIR, SAVED_VIDEOS_DIR):
         f"DOWNLOAD_DIR={DOWNLOAD_DIR}\n"
         f"SAVED_VIDEOS_DIR={SAVED_VIDEOS_DIR}"
     )
+
+for p_sub in ["youtube", "facebook", "tiktok", "dramatip", "dramabox", "instagram", "dailymotion", "twitter"]:
+    try:
+        (SAVED_VIDEOS_DIR / p_sub).mkdir(parents=True, exist_ok=True)
+    except Exception as exc:
+        logger.warning(f"No se pudo crear subdirectorio inicial para {p_sub}: {exc}")
 
 async def handle_unauthorized_user(update: Update, command: str = None):
     """Handle unauthorized access attempts."""
@@ -754,7 +762,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             series_title = series_info.get("title", "Serie")
             raw_slug = series_info.get("slug", "series")
             series_folder = "".join(c if (c.isalnum() or c in "-_") else "_" for c in raw_slug)
-            output_dir = SAVED_VIDEOS_DIR
+            platform_folder = get_platform_folder(platform)
+            output_dir = SAVED_VIDEOS_DIR / platform_folder
 
             await message.edit_text(
                 f"⏳ Iniciando descarga de serie: *{series_title}*\nTotal de episodios: {total_eps}...",
@@ -791,7 +800,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                         f"📺 *Descargando serie:* {series_title}\n\n"
                         f"📦 *Capítulo {ep}/{total}*: [{bar}] {pct}%\n"
                         f"✅ *Guardados hasta ahora:* {completed}/{total}\n"
-                        f"📁 *Destino:* `/data/saved_videos/{series_folder}/Season 01/`"
+                        f"📁 *Destino:* `/data/saved_videos/{platform_folder}/{series_folder}/Season 01/`"
                     )
                     try:
                         await message.edit_text(text, parse_mode="Markdown")
@@ -837,13 +846,22 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 f"✅ *¡Descarga de serie completada!*\n\n"
                 f"📺 *Serie:* {series_title}\n"
                 f"📦 *Capítulos guardados:* {successful}/{total_count}\n"
-                f"💾 *Ubicación:* `/data/saved_videos/{series_folder}/Season 01/`"
+                f"💾 *Ubicación:* `/data/saved_videos/{platform_folder}/{series_folder}/Season 01/`"
             )
             await message.edit_text(text, parse_mode="Markdown")
             return
 
         # Choose directory based on action
-        output_dir = SAVED_VIDEOS_DIR if query.data in ["save", "save_and_send"] else DOWNLOAD_DIR
+        platform_folder = get_platform_folder(platform)
+        if query.data in ["save", "save_and_send"]:
+            series_slug = extract_series_slug(url, platform)
+            if series_slug:
+                safe_series_folder = re.sub(r"[^a-zA-Z0-9_-]", "_", series_slug)
+                output_dir = SAVED_VIDEOS_DIR / platform_folder / safe_series_folder / "Season 01"
+            else:
+                output_dir = SAVED_VIDEOS_DIR / platform_folder
+        else:
+            output_dir = DOWNLOAD_DIR
         
         await message.edit_text("⬇️ Descargando video... 0%")
         last_progress = {"percent": -1}
@@ -979,16 +997,21 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             )
         elif query.data == "save":
             # Solo guardar
+            rel_path = (
+                str(video_path.relative_to(SAVED_VIDEOS_DIR))
+                if SAVED_VIDEOS_DIR in video_path.parents
+                else video_path.name
+            )
             await message.edit_text(
-                f"✅ Video guardado exitosamente como:\n"
-                f"`{video_path.name}`"
+                f"✅ Video guardado exitosamente en:\n"
+                f"`{rel_path}`"
             )
             logger.info(
                 "action_success chat_id=%s username=%s action=%s result=saved file=%s",
                 chat_id,
                 username,
                 action,
-                video_path.name,
+                rel_path,
             )
         else:  # save_and_send
             # Guardar y enviar
@@ -1009,6 +1032,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                     pass
                 video_path = send_path
 
+            rel_path = (
+                str(video_path.relative_to(SAVED_VIDEOS_DIR))
+                if SAVED_VIDEOS_DIR in video_path.parents
+                else video_path.name
+            )
             size_mb = _file_size_mb(video_path)
             if size_mb > TELEGRAM_MAX_UPLOAD_MB:
                 record_telegram_upload("too_large", 0.0)
@@ -1020,10 +1048,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                     action,
                     size_mb,
                     TELEGRAM_MAX_UPLOAD_MB,
-                    video_path.name,
+                    rel_path,
                 )
                 await message.edit_text(
-                    f"✅ Video guardado como:\n`{video_path.name}`\n\n"
+                    f"✅ Video guardado en:\n`{rel_path}`\n\n"
                     f"⚠️ No se pudo reenviar: pesa {size_mb:.2f} MB y excede el límite de Telegram (≈{TELEGRAM_MAX_UPLOAD_MB:.0f} MB)."
                 )
                 return
@@ -1034,7 +1062,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 await context.bot.send_video(
                     chat_id=chat_id,
                     video=video_path,
-                    caption=f"📹 Video guardado como:\n`{video_path.name}`",
+                    caption=f"📹 Video guardado en:\n`{rel_path}`",
                     width=video_kwargs.get("width"),
                     height=video_kwargs.get("height"),
                     duration=video_kwargs.get("duration"),

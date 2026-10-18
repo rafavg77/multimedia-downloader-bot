@@ -414,6 +414,48 @@ def _normalize_slug(slug: str) -> str:
     return safe or "series"
 
 
+def get_platform_folder(platform: str) -> str:
+    """Return canonical directory name for a platform."""
+    mapping = {
+        "youtube": "youtube",
+        "facebook": "facebook",
+        "tiktok": "tiktok",
+        "dramatip": "dramatip",
+        "dramabox": "dramabox",
+        "instagram": "instagram",
+        "dailymotion": "dailymotion",
+        "reddit": "reddit",
+        "x_twitter": "twitter",
+        "twitter": "twitter",
+        "flixgaze": "flixgaze",
+    }
+    return mapping.get((platform or "").lower(), (platform or "other").lower())
+
+
+def extract_series_slug(url: str, platform: str) -> str | None:
+    """Extract normalized series slug if URL belongs to a series on Dramatip or DramaBox."""
+    if not url:
+        return None
+    try:
+        parsed = urlparse(url)
+        path = parsed.path
+        if platform == "dramatip":
+            match = DRAMATIP_PATH_RE.match(path)
+            if match:
+                _, slug, _ = match.groups()
+                return _normalize_slug(slug)
+        elif platform == "dramabox":
+            match = DRAMABOX_PATH_RE.match(path)
+            if match:
+                _, m_book_id, m_slug, ep_book_id, ep_slug, _, _ = match.groups()
+                raw_slug = m_slug or ep_slug or m_book_id or ep_book_id
+                if raw_slug:
+                    return _normalize_slug(raw_slug)
+    except Exception:
+        pass
+    return None
+
+
 def get_dramabox_series_info(url: str) -> dict | None:
     """Extracts series metadata, bookId, and list of all available episodes from a DramaBox URL."""
     parsed = urlparse(url)
@@ -598,6 +640,9 @@ async def download_series(
             series_base_dir / f"{safe_slug}-capitulo-{ep}.mp4",
             series_dir / f"{safe_slug}-capitulo-{ep}.mp4",
             output_dir / f"{safe_slug}-capitulo-{ep}.mp4",
+            output_dir.parent / safe_slug / "Season 01" / target_name,
+            output_dir.parent / safe_slug / target_name,
+            output_dir.parent / f"{safe_slug}-capitulo-{ep}.mp4",
         ]
         found_existing = next(
             (p for p in candidate_paths if p.exists() and p.stat().st_size >= MIN_VALID_EPISODE_BYTES),
@@ -982,6 +1027,7 @@ def _run_ytdlp_download(url: str, outtmpl: str, headers: dict[str, str], progres
         "merge_output_format": "mp4",
         "cachedir": False,
         "noprogress": True,
+        "updatetime": False,
         "progress_hooks": [progress_hook] if progress_hook else [],
         "http_headers": headers or {},
         "quiet": True,
@@ -1035,6 +1081,9 @@ async def download_video(url: str, output_dir: Path, progress_callback: Progress
 
     try:
         safe_dir = str(output_dir.expanduser().resolve())
+        allowed_extensions = {'.mp4', '.mkv', '.webm', '.mov'}
+        before_files = {p for p in output_dir.iterdir() if p.is_file() and p.suffix.lower() in allowed_extensions} if output_dir.exists() else set()
+
         effective_url, headers, custom_title = _prepare_download_target(url)
         if custom_title:
             outtmpl = f"{safe_dir}/{custom_title}.%(ext)s"
@@ -1081,12 +1130,12 @@ async def download_video(url: str, output_dir: Path, progress_callback: Progress
         if last_download_error is not None:
             raise last_download_error
 
-        allowed_extensions = {'.mp4', '.mkv', '.webm', '.mov'}
         candidate_files = [p for p in output_dir.iterdir() if p.is_file() and p.suffix.lower() in allowed_extensions]
         if not candidate_files:
             return False, "No se encontró el archivo de video descargado", Path()
 
-        latest_file = max(candidate_files, key=lambda x: x.stat().st_mtime)
+        new_files = [p for p in candidate_files if p not in before_files]
+        latest_file = max(new_files, key=lambda x: x.stat().st_mtime) if new_files else max(candidate_files, key=lambda x: x.stat().st_mtime)
         return True, "Descarga exitosa", latest_file
 
     except DownloadError as e:
