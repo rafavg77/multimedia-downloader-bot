@@ -5,6 +5,8 @@ import logging
 import asyncio
 import signal
 import time
+import html
+from datetime import datetime
 from typing import Final
 from pathlib import Path
 from urllib.parse import urlparse, urlunparse
@@ -219,10 +221,23 @@ def format_public_ip_message(info: dict) -> str:
 
 async def build_network_status_message() -> str:
     private_ip, public_info = await asyncio.gather(get_private_ip(), get_public_ipinfo())
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    pub_ip = html.escape(public_info.get("ip", "No disponible"))
+    city = html.escape(public_info.get("city", "N/A"))
+    country = html.escape(public_info.get("country", "N/A"))
+    org = html.escape(public_info.get("org", "N/A"))
+
     return (
-        "🤖 Bot iniciado\n\n"
-        f"{format_private_ip_message(private_ip)}\n\n"
-        f"{format_public_ip_message(public_info)}"
+        "<b>🤖 Estado de Red — multimedia-downloader-bot</b>\n\n"
+        "<b>✅ Estado general:</b> ONLINE\n"
+        f"<b>🕛 Fecha:</b> <code>{now_str}</code>\n"
+        f"<b>📡 IP Privada:</b> <code>{html.escape(private_ip)}</code>\n"
+        f"<b>🌐 IP Pública:</b> <code>{pub_ip}</code>\n\n"
+        "<b>📊 Geolocalización y Proveedor:</b>\n"
+        "🌍 <b>Conectividad</b>\n"
+        f" ├ <b>Ubicación:</b> {city}, {country}\n"
+        f" └ <b>ISP / Red:</b> <code>{org}</code>"
     )
 
 
@@ -238,6 +253,7 @@ async def send_startup_notification(application: Application) -> None:
         await application.bot.send_message(
             chat_id=STARTUP_NOTIFY_CHAT_ID,
             text=await build_network_status_message(),
+            parse_mode="HTML",
             reply_markup=_main_menu(False),
         )
         logger.info("startup_notification_sent chat_id=%s", STARTUP_NOTIFY_CHAT_ID)
@@ -940,10 +956,18 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                     size_mb,
                     TELEGRAM_MAX_UPLOAD_MB,
                 )
-                await message.edit_text(
-                    f"⚠️ El video pesa {size_mb:.2f} MB y excede el límite de envío del bot (≈{TELEGRAM_MAX_UPLOAD_MB:.0f} MB).\n"
-                    "Usa la opción 'Descargar y guardar' para conservarlo en el servidor."
+                date_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                err_text = (
+                    "<b>🎬 Descarga Multimedia — multimedia-downloader-bot</b>\n\n"
+                    "<b>⚠️ Estado general:</b> LÍMITE DE TAMAÑO EXCEDIDO\n"
+                    f"<b>🕛 Fecha:</b> <code>{date_str}</code>\n\n"
+                    "<b>📊 Detalle del Video:</b>\n"
+                    "📹 <b>Archivo</b>\n"
+                    f" ├ <b>Tamaño:</b> <code>{size_mb:.2f} MB</code>\n"
+                    f" ├ <b>Límite bot:</b> <code>≈{TELEGRAM_MAX_UPLOAD_MB:.0f} MB</code>\n"
+                    " └ <b>Acción sugerida:</b> Usa 'Descargar y guardar' para conservarlo en el servidor"
                 )
+                await message.edit_text(err_text, parse_mode="HTML")
                 return
 
             video_kwargs = await _telegram_video_kwargs(send_path)
@@ -1050,10 +1074,18 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                     TELEGRAM_MAX_UPLOAD_MB,
                     rel_path,
                 )
-                await message.edit_text(
-                    f"✅ Video guardado en:\n`{rel_path}`\n\n"
-                    f"⚠️ No se pudo reenviar: pesa {size_mb:.2f} MB y excede el límite de Telegram (≈{TELEGRAM_MAX_UPLOAD_MB:.0f} MB)."
+                date_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                save_text = (
+                    "<b>🎬 Descarga Multimedia — multimedia-downloader-bot</b>\n\n"
+                    "<b>⚠️ Estado general:</b> GUARDADO (ENVÍO OMITIDO)\n"
+                    f"<b>🕛 Fecha:</b> <code>{date_str}</code>\n\n"
+                    "<b>📊 Detalle del Archivo:</b>\n"
+                    "📁 <b>Almacenamiento Local</b>\n"
+                    f" ├ <b>Ruta:</b> <code>{html.escape(rel_path)}</code>\n"
+                    f" ├ <b>Tamaño:</b> <code>{size_mb:.2f} MB</code>\n"
+                    f" └ <b>Aviso:</b> Excede límite de reenvío en Telegram (≈{TELEGRAM_MAX_UPLOAD_MB:.0f} MB)"
                 )
+                await message.edit_text(save_text, parse_mode="HTML")
                 return
 
             video_kwargs = await _telegram_video_kwargs(video_path)
@@ -1062,7 +1094,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 await context.bot.send_video(
                     chat_id=chat_id,
                     video=video_path,
-                    caption=f"📹 Video guardado en:\n`{rel_path}`",
+                    caption=f"📹 <b>Video guardado:</b> <code>{html.escape(rel_path)}</code>",
+                    parse_mode="HTML",
                     width=video_kwargs.get("width"),
                     height=video_kwargs.get("height"),
                     duration=video_kwargs.get("duration"),
